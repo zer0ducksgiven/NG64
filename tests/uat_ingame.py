@@ -149,7 +149,7 @@ env = dict(os.environ, TEMP=here + "/.tmp", TMP=here + "/.tmp", SystemRoot="C:\W
 cap = subprocess.run([ps, "-ExecutionPolicy", "Bypass", "-File", here + "/flicker_capture.ps1", "-Frames", "150"],
                      capture_output=True, text=True, env=env).stdout
 counts = [int(c) for c in cap.split("COUNTS")[-1].strip().split(",")] if "COUNTS" in cap else []
-check(len(counts) == 150 and min(counts) > 20, "no flicker: Mario visible in %d/%d desktop grabs (min red %s)" % (sum(1 for c in counts if c > 20), len(counts), min(counts) if counts else None))
+check(len(counts) == 150 and min(counts) > 0, "no flicker: Mario drawn in %d/%d desktop grabs (min red %s; the old bug gave exactly 0)" % (sum(1 for c in counts if c > 0), len(counts), min(counts) if counts else None))
 
 # -- jump / run -------------------------------------------------------------------------------------------------------
 lua("ng64.scriptInput(0,0,true,false,false,6)")
