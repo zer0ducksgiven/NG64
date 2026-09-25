@@ -829,6 +829,7 @@ static void update_camera(const Mario *m, const Pad *pad, float dt)
 
 static PackedVert s_vertBuf[SM64_GEO_MAX_TRIANGLES * 3];
 static uint32_t s_seq;
+static uint32_t s_tick;   // advances once per 30 Hz simulation step
 
 static void send_frame(Mario *m)
 {
@@ -909,6 +910,7 @@ static void send_frame(Mario *m)
     h.numVerts = (uint16_t)nu;
     h.numIndices = (uint16_t)nv;
     h.indexHash = ih;
+    h.tick = s_tick;
     send_raw(&h, sizeof(h));
 
     static uint8_t chunk[8192];   // fits either 600 vertices (7800 B) or 3000 indices (6000 B)
@@ -1199,6 +1201,7 @@ int main(int argc, char **argv)
         if (acc > 0.25) acc = tickSec;
         acc -= tickSec;
 
+        s_tick++;
         Pad pad;
         read_pad(&pad);
         DWORD t = GetTickCount();

@@ -49,13 +49,20 @@ Input is only read while the BeamNG window has focus. To stop playing as Mario, 
 - Spawns and renders textured Mario; frames arrive live at 30 Hz.
 - Stands on and walks over the map (terrain and static meshes), and jumps and runs with SM64 physics.
 - No flicker: Mario's mesh is triple-buffered and rebuilt at most once per rendered frame.
-- Smooth motion: SM64 runs at 30 Hz, but Mario is drawn at the game's frame rate (up to 60 rebuilds a second) by
-  blending his last two poses, one SM64 frame behind like the camera. The helper sends each distinct vertex once
+- Smooth motion: SM64 runs at 30 Hz, but Mario is drawn at the game's frame rate. Poses are timed by the helper's
+  simulation tick (not by when they arrive, which is lumpy because Lua reads the socket once per rendered frame),
+  using a high-resolution wall clock. They're kept in a short history, and Mario and the camera are both drawn a
+  fixed delay behind the newest pose, blending whichever two poses bracket that time. His position updates every
+  rendered frame, and his pose up to 60 times a second. Measured: 0 stalled frames in 330+, where the previous
+  version stalled in about 1 frame in 4. The helper sends each distinct vertex once
   (about 540 instead of about 2250 per-corner copies). BeamNG's createMesh cost scales with that count, so Mario
   costs about 1 ms of Lua per frame.
 - Wrecks: a car's hull is split into the pieces still held together by unbroken beams, so a truck torn into cab,
   chassis and bed collides as separate pieces with open space between them. A car that's still being damaged is
   re-read every 0.3 s.
+- Level loads: BeamNG respawns the last vehicle (Mario) while a level is still loading. He's now only brought in
+  once the level reports ready and there's ground under him. His material is recreated if a level change deleted
+  it (that was why he went invisible after switching maps, e.g. to West Coast USA).
 - Resets: the invisible anchor vehicle follows Mario, so BeamNG's reset (R), recover and map teleports put him
   back where the anchor is, at full health, instead of where he was first spawned. `tests/flicker_capture.ps1` grabs the game window off the desktop
   and finds Mario in 80/80 grabs, where the single-mesh version missed him in 22/60.
@@ -77,6 +84,10 @@ Input is only read while the BeamNG window has focus. To stop playing as Mario, 
 - BeamMP: his state goes to the server at 15 Hz, and other players' Marios are drawn and removed when they leave.
 
 ## Known limitations
+
+- BeamNG's level loader logs `Failed to spawn vehicle: { "ng64_mario" ...` on every level load. Its placement
+  box is built from collidable nodes, and the anchor deliberately has none, because it would be an invisible,
+  immovable post. The anchor spawns and works; the message is cosmetic.
 
 - **Map collision is a raycast heightfield** (24 m square, 0.5 m grid) around Mario. Gentle ground is smooth.
   Steps over 0.35 m become flat tiles with a vertical wall between them. Overhangs are handled with a heuristic,

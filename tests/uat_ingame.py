@@ -304,6 +304,21 @@ perf = text(tool("get_performance_metrics"))
 print("  mesh builds/s %.0f; %s" % (rate, perf[:160].replace("\n", " ")))
 check(rate > 40, "Mario's mesh updates at the render rate (%.0f builds/s, 30 Hz would be 30)" % rate)
 
+# -- motion: Mario moves every rendered frame, at an even speed (poses timed by simulation tick, history buffer) --
+lua("ng64.scriptInput(0,-1,false,false,false,150,1,0)")
+time.sleep(1.5)
+lua("ng64.startTrace()")
+time.sleep(2.5)
+import statistics
+trows = [list(map(float, l.split())) for l in lua("return ng64.getTrace()").strip().splitlines() if l.strip()]
+sp = []
+for a_, b_ in zip(trows, trows[1:]):
+    dt_ = b_[0] - a_[0]
+    if dt_ > 0: sp.append((((b_[2] - a_[2]) ** 2 + (b_[3] - a_[3]) ** 2) ** 0.5) / dt_)
+stalls = sum(1 for v in sp if v < 0.25 * statistics.mean(sp))
+jit = statistics.pstdev(sp) / statistics.mean(sp)
+check(stalls == 0 and jit < 0.35, "Mario moves every rendered frame at an even speed (%d stalled of %d, jitter %.2f)" % (stalls, len(sp), jit))
+
 # -- a wreck in two pieces: two hulls, and the gap between them is open ------------------------------------------
 fresh_car()
 cx, cy, cz, nx, ny, half, fx, fy = car_geo()
@@ -381,8 +396,26 @@ st = status()
 check(st.get("active") is False, "switching to another vehicle hands control back")
 check("true" in lua("return tostring(not commands.isFreeCamera())"), "game camera restored")
 
+# -- another level with Mario as the current vehicle: he must come back textured and on the ground ------------------
+lua("core_vehicles.replaceVehicle('ng64_mario', {config='vehicles/ng64_mario/mario.pc'})")
+time.sleep(4)
+lua("freeroam_freeroam.startFreeroamByName('smallgrid')")
+ok = wait_for(lambda: status().get("active") is True and "smallgrid" in lua("return tostring(getMissionFilename())"), 240, 2)
+time.sleep(3)
+mat_ok = "true" in lua("local n=ng64.getStatus().material return tostring(n ~= nil and scenetree.findObject(n) ~= nil)")
+ground = lua("local p=getPlayerVehicle(0):getPosition() return tostring(p.z - castRayStatic(p+vec3(0,0,3), vec3(0,0,-1), 50) + 3)").split()[-1]
+mz2 = status()["pos"][2]
+cap2 = subprocess.run([ps, "-ExecutionPolicy", "Bypass", "-File", here + "/flicker_capture.ps1", "-Frames", "30"], capture_output=True, text=True, env=env).stdout
+c2 = [int(c) for c in cap2.split("COUNTS")[-1].strip().split(",")] if "COUNTS" in cap2 else []
+check(bool(ok) and mat_ok and abs(mz2 - float(ground)) < 0.2 and c2 and min(c2) > 0,
+      "after loading another level Mario is textured, on the ground and drawn (material %s, z %.2f vs ground %s, drawn in %d/%d grabs)" % (mat_ok, mz2, ground, sum(1 for c in c2 if c > 0), len(c2)))
+shot("09_level_switch")
+
 errs = pull_logs()
-ng_errs = [l for l in errs.splitlines() if "|E|" in l and "ng64" in l.lower()]
+# BeamNG's level loader logs "Failed to spawn vehicle" for the Mario anchor on every level load: its spawn-placement
+# box is built from collidable nodes, and the anchor deliberately has none (it would be an invisible solid post).
+# The vehicle still spawns and works; this one message is expected.
+ng_errs = [l for l in errs.splitlines() if "|E|" in l and "ng64" in l.lower() and "Failed to spawn vehicle" not in l]
 check(not ng_errs, "no ng64 errors in log %s" % ng_errs[:5])
 
 print("\nFAILURES:", fails if fails else "none")

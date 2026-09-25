@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define NG64_PORT          47064
-#define NG64_PROTO_VERSION 4
+#define NG64_PROTO_VERSION 5
 
 // BeamNG metres per SM64 unit (same scale sm64-san-andreas uses for GTA).
 #define NG64_SCALE 0.0085f
@@ -49,6 +49,7 @@ typedef struct {
     uint16_t numVerts;      // unique vertices (MSG_CHUNK)
     uint16_t numIndices;    // triangle corners (MSG_INDEX), 3 per triangle
     uint32_t indexHash;     // FNV-1a of the index list: same hash = same topology, so frames can be blended
+    uint32_t tick;          // simulation tick (30 Hz) this pose belongs to - the mod times blending by this, not arrival
 } FrameHeader;
 
 typedef struct {

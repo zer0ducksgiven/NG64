@@ -9,7 +9,7 @@ local logTag = "ng64"
 local ffi = require("ffi")
 
 local HELPER_HOST, HELPER_PORT = "127.0.0.1", 47064
-local PROTO_VERSION = 4
+local PROTO_VERSION = 5
 local STUB_MODEL = "ng64_mario"
 
 local GRID_N, GRID_SP = 49, 0.5         -- terrain sample grid around Mario (24 m square)
@@ -25,7 +25,7 @@ typedef struct {
   float pos[3]; float vel[3]; float faceAngle;
   int16_t health; uint32_t action; int16_t animId; int16_t animFrame; uint32_t flags;
   float camPos[3]; float camTarget[3];
-  uint16_t numVerts; uint16_t numIndices; uint32_t indexHash;
+  uint16_t numVerts; uint16_t numIndices; uint32_t indexHash; uint32_t tick;
 } ng64_FrameHeader;
 typedef struct { uint8_t type; uint32_t key; uint32_t seq; uint16_t start; uint16_t count; } ng64_ChunkHeader;
 typedef struct { int16_t p[3]; int8_t n[3]; uint16_t uv[2]; } ng64_PackedVert;
@@ -62,6 +62,8 @@ local mpAccum = 0
 local hitCount, hurtCount, hullCount, carDentCount, meshBuilds = 0, 0, 0, 0, 0   -- for UAT
 local hullPieces = {}   -- vehicle id -> pieces in its last hull
 local profCreate, profBlend = 0, 0   -- seconds spent in createMesh / blending, for tuning
+local traceOn, trace = false, {}
+local framesStarted, framesCompleted = 0, 0   -- local Mario frames begun vs fully received (dropped packets)
 local simTime = 0
 
 -- ------------------------------------------------------------------------------------------------------------
@@ -89,7 +91,10 @@ local function sendHello()
 end
 
 local function ensureMaterial(path)
-  if not path or path == "" or path == atlasPath then return end
+  if not path or path == "" then return end
+  -- same atlas and the material still exists: nothing to do. Loading another level deletes it, and Mario was then
+  -- drawn with a material that no longer existed - invisible on whichever map you went to next.
+  if path == atlasPath and materialName and scenetree.findObject(materialName) then return end
   atlasPath = path
   materialSerial = materialSerial + 1
   local name = "ng64_mario_mat_" .. materialSerial
@@ -144,6 +149,67 @@ local function trim(t, n, upto)
 end
 
 local NUM_MESH_BUFFERS = 3
+
+-- Poses are timed by the helper's simulation tick (exactly 1/30 s apart), not by when they arrive: Lua only reads the
+-- socket once per rendered frame, so arrival times are lumpy, and blending by them made Mario stall every few
+-- frames. clockOffset maps ticks onto simTime (the earliest arrival seen, drifting up slowly to follow the helper);
+-- everything is drawn RENDER_DELAY behind that, i.e. between the last two poses.
+local TICK = 1 / 30
+-- Wall clock for all of this: summed frame deltas drift against the helper's real-time ticks, and
+-- getSystemTimeMS only moves in ~16 ms steps.
+local wallTimer = hptimer()
+local function wallTime() return wallTimer:stop() * 0.001 end
+
+-- Over the last ~2 s of poses: the earliest arrival (relative to its tick) fixes where ticks sit on the wall clock,
+-- and the spread of arrivals is how much jitter the delay has to absorb. A window rather than an all-time minimum,
+-- because a helper hiccup shifts its ticks against the wall clock for good.
+local ARRIVAL_WINDOW = 60
+local arrivals, arrivalHead = {}, 0
+local clockOffset, arrivalSpread = nil, 0.01
+
+local function noteTick(tick)
+  local est = wallTime() - tick * TICK
+  arrivalHead = arrivalHead % ARRIVAL_WINDOW + 1
+  arrivals[arrivalHead] = est
+  local lo, hi = math.huge, -math.huge
+  for _, e in pairs(arrivals) do
+    if e < lo then lo = e end
+    if e > hi then hi = e end
+  end
+  if clockOffset and lo - clockOffset > 0.5 then arrivals = { est } arrivalHead = 1 lo, hi = est, est end   -- helper restarted
+  clockOffset, arrivalSpread = lo, math.min(0.1, hi - lo)
+end
+
+local function renderTime()
+  local now = wallTime()
+  return now - (clockOffset or now) - (TICK + arrivalSpread + 0.005)
+end
+
+-- The two poses either side of the render time, and how far between them (0..1). Poses don't arrive evenly (Lua
+-- reads the socket once per rendered frame), so a short history is kept and the render time runs a fixed delay
+-- behind the newest: with only the last two, an early pose made Mario wait and a late one made him hold.
+local HISTORY = 5
+local function pairFor(pf)
+  local h = pf.hist
+  local n = h and #h or 0
+  if n == 0 then return nil end
+  if n == 1 then return h[1], h[1], 1 end
+  local rt = renderTime()
+  if rt >= h[n].t then return h[n - 1], h[n], 1 end
+  if rt <= h[1].t then return h[1], h[2], 0 end
+  for i = n - 1, 1, -1 do
+    if h[i].t <= rt then
+      local p0, p1 = h[i], h[i + 1]
+      return p0, p1, (rt - p0.t) / math.max(1e-6, p1.t - p0.t)
+    end
+  end
+  return h[1], h[2], 0
+end
+
+local function blendable(p0, p1)
+  return p0 ~= p1 and p0.ihash == p1.ihash and p0.nv == p1.nv
+end
+
 local MAX_BUILDS_PER_SECOND = 60   -- createMesh is BeamNG's cost; blending faster than this isn't visible anyway
 
 -- A finished 30 Hz pose becomes "current", the old current becomes "previous", and the next one is filled into
@@ -167,33 +233,46 @@ local function completeFrame(pf)
     filled.facesHash = pf.ihash
   end
   filled.nv, filled.ni = nv, ni
-  pf.prev = pf.cur
-  pf.cur = { pool = filled, nv = nv, ihash = pf.ihash, pos = pf.pos, vel = pf.vel, t = simTime }
-  for i = 1, 3 do
-    local p = pf.pools[i]
-    if p ~= filled and (not pf.prev or p ~= pf.prev.pool) then pf.fill = i break end
-  end
+  local frame = { pool = filled, nv = nv, ihash = pf.ihash, pos = pf.pos, vel = pf.vel, t = pf.tick * TICK,
+                  camPos = pf.camPos, camTarget = pf.camTarget }
+  pf.hist = pf.hist or {}
+  local h = pf.hist
+  if h[#h] and frame.t <= h[#h].t then h = {} pf.hist = h end   -- ticks went backwards: helper restarted
+  h[#h + 1] = frame
+  if #h > HISTORY then table.remove(h, 1) end
+  pf.cur = frame
+  -- fill the next pose into a pool no kept pose is using
+  local used = {}
+  for _, f in ipairs(h) do used[f.pool] = true end
+  pf.fill = nil
+  for i, p in ipairs(pf.pools) do if not used[p] then pf.fill = i break end end
+  if not pf.fill then pf.pools[#pf.pools + 1] = newPool() pf.fill = #pf.pools end
   pf.dirty = true
 end
 
--- the pose to draw this rendered frame
+-- The pose to draw this rendered frame. Returns the full vertex set when a rebuild is due (a new pose, or the blend
+-- moved on and the 60/s build cap allows it); otherwise just the blended position, which is applied every frame so
+-- Mario's movement through the world stays smooth even between rebuilds.
 local function blendedFrame(pf)
-  local cur, prev = pf.cur, pf.prev
-  if not cur then return nil end
-  local a = 1
-  if prev and prev.ihash == cur.ihash and prev.nv == cur.nv and cur.t > prev.t then
-    a = math.min(1, math.max(0, (simTime - cur.t) / math.max(1 / 60, cur.t - prev.t)))
+  local p0, p1, a = pairFor(pf)
+  if not p0 then return nil end
+  local mix = blendable(p0, p1)
+  if not mix then
+    if a < 0.5 then p1 = p0 end   -- topology changed between them: show whichever is nearer
+    a = 1
   end
-  if not pf.dirty then
-    if a >= 1 and pf.lastAlpha == 1 then return nil end                         -- nothing changed since last build
-    if simTime - (pf.lastBuild or -1) < 1 / MAX_BUILDS_PER_SECOND then return nil end
+  local pos = mix and (p0.pos * (1 - a) + p1.pos * a) or p1.pos
+  local pairChanged = pf.lastP1 ~= p1 or pf.lastP0 ~= p0
+  local rebuild = pf.dirty and pairChanged or pairChanged
+    or (mix and math.abs(a - (pf.lastAlpha or -1)) > 0.02 and simTime - (pf.lastBuild or -1) >= 1 / MAX_BUILDS_PER_SECOND)
+  pf.dirty = false
+  if not rebuild then return { pos = pos } end
+  pf.lastP0, pf.lastP1, pf.lastAlpha, pf.lastBuild = p0, p1, a, simTime
+  if not mix or a >= 1 then
+    return { verts = p1.pool.verts, normals = p1.pool.normals, uvs = p1.pool.uvs, faces = p1.pool.faces, nv = p1.nv, pos = pos, vel = p1.vel }
   end
-  pf.dirty, pf.lastAlpha, pf.lastBuild = false, a, simTime
-  if a >= 1 or not prev then
-    return { verts = cur.pool.verts, normals = cur.pool.normals, uvs = cur.pool.uvs, faces = cur.pool.faces, nv = cur.nv, pos = cur.pos, vel = cur.vel }
-  end
-  local out, pp, cp, b = pf.out, prev.pool, cur.pool, 1 - a
-  for j = 1, cur.nv do
+  local out, pp, cp, b = pf.out, p0.pool, p1.pool, 1 - a
+  for j = 1, p1.nv do
     local vo = out.verts[j]; if not vo then vo = {}; out.verts[j] = vo end
     local v0, v1 = pp.verts[j], cp.verts[j]
     vo.x, vo.y, vo.z = v0.x * b + v1.x * a, v0.y * b + v1.y * a, v0.z * b + v1.z * a
@@ -201,10 +280,10 @@ local function blendedFrame(pf)
     local n0, n1 = pp.normals[j], cp.normals[j]
     no.x, no.y, no.z = n0.x * b + n1.x * a, n0.y * b + n1.y * a, n0.z * b + n1.z * a
   end
-  trim(out.verts, cur.nv, out.nv or 0)
-  trim(out.normals, cur.nv, out.nv or 0)
-  out.nv = cur.nv
-  return { verts = out.verts, normals = out.normals, uvs = cp.uvs, faces = cp.faces, nv = cur.nv, pos = prev.pos * b + cur.pos * a, vel = cur.vel }
+  trim(out.verts, p1.nv, out.nv or 0)
+  trim(out.normals, p1.nv, out.nv or 0)
+  out.nv = p1.nv
+  return { verts = out.verts, normals = out.normals, uvs = cp.uvs, faces = cp.faces, nv = p1.nv, pos = pos, vel = p1.vel }
 end
 
 -- Only ever called once per onUpdate, with the newest complete frame. createMesh leaves an object blank until the
@@ -225,6 +304,7 @@ local function buildMesh(key, r)
     end
     meshes[key] = entry
   end
+  if materialName and not scenetree.findObject(materialName) then ensureMaterial(atlasPath) end
   if nv > 0 and materialName then
     -- next mesh that is neither on screen nor waiting to be hidden
     local back
@@ -416,13 +496,14 @@ end
 -- camera
 
 local function applyCamera()
-  if not curCam then return end
-  local a = 1
-  if prevCam then a = math.min(1, (simTime - curCam.t) / (1 / 30)) end
-  local pos, target = curCam.pos, curCam.target
-  if prevCam then
-    pos = prevCam.pos + (curCam.pos - prevCam.pos) * a
-    target = prevCam.target + (curCam.target - prevCam.target) * a
+  -- same clock and the same two poses as Mario's mesh, so they can never drift against each other
+  local pf = pendingFrames[0]
+  local p0, p1, a = pairFor(pf or {})
+  if not p0 or not p1.camPos then return end
+  local pos, target = p1.camPos, p1.camTarget
+  if p0.camPos and p0 ~= p1 then
+    pos = p0.camPos + (p1.camPos - p0.camPos) * a
+    target = p0.camTarget + (p1.camTarget - p0.camTarget) * a
   end
   -- pull in when something is between Mario and the camera
   local dir = pos - target
@@ -460,10 +541,30 @@ local function followStub(stub, pos)
   stub:setPosRot(pos.x, pos.y, pos.z + 0.05, 0, 0, 0, 1)
 end
 
+-- Mario is only brought in once the level has finished loading and there's real ground under the spawn point.
+-- When a level loads, BeamNG respawns the last player vehicle - Mario - while the map's objects are still loading;
+-- on a big map (West Coast USA takes seconds) the terrain scan then found nothing and he spawned with no collision.
+local pendingActivateId, pendingActivateAt, waitingLogged = nil, 0, false
+
+local function groundUnder(p)
+  local hits = 0
+  for i = -2, 2 do
+    for j = -2, 2 do
+      local h = sampleHeight(p.x + i * 2, p.y + j * 2, p.z)
+      if h == h then hits = hits + 1 end   -- not NaN
+    end
+  end
+  return hits >= 5
+end
+
 local function activate(veh)
   openSocket()
   if not connected then sendHello() end
   stubId = veh:getID()
+  pendingActivateId, pendingActivateAt, waitingLogged = stubId, simTime, false
+end
+
+local function finishActivate(veh)
   local p = veh:getPosition()
   -- synchronous grid so Mario has a floor the moment he spawns
   startGrid(p)
@@ -479,6 +580,7 @@ local function activate(veh)
 end
 
 local function deactivate()
+  pendingActivateId = nil
   if not active then return end
   active = false
   sendRaw("D")
@@ -545,6 +647,13 @@ local function handlePacket(data)
     local pf = pendingFrames[key]
     if not pf then pf = { pools = { newPool(), newPool(), newPool() }, fill = 1, out = newPool() }; pendingFrames[key] = pf end
     pf.seq, pf.nv, pf.ni, pf.ihash, pf.got, pf.gotIdx, pf.pos, pf.vel = tonumber(h.seq), nv, ni, tonumber(h.indexHash), 0, 0, pos, vel
+    pf.tick = tonumber(h.tick)
+    noteTick(pf.tick)
+    if key == 0 then
+      pf.camPos = vec3(h.camPos[0], h.camPos[1], h.camPos[2])
+      pf.camTarget = vec3(h.camTarget[0], h.camTarget[1], h.camTarget[2])
+    end
+    if key == 0 then framesStarted = framesStarted + 1 end
     if nv == 0 then completeFrame(pf) end
     if key == 0 then
       lastLocalFrame = {
@@ -553,8 +662,6 @@ local function handlePacket(data)
         animId = h.animId, animFrame = h.animFrame, flags = tonumber(h.flags), numVerts = nv,
       }
       localFrameTime = simTime
-      prevCam = curCam
-      curCam = { pos = vec3(h.camPos[0], h.camPos[1], h.camPos[2]), target = vec3(h.camTarget[0], h.camTarget[1], h.camTarget[2]), t = simTime }
     end
   elseif t == "G" or t == "J" then
     if #data < CHUNK_HEADER_SIZE then return end
@@ -574,7 +681,10 @@ local function handlePacket(data)
       fillIndices(pf.pools[pf.fill], start, count)
       pf.gotIdx = pf.gotIdx + count
     end
-    if pf.got == pf.nv and pf.gotIdx == pf.ni then completeFrame(pf) end
+    if pf.got == pf.nv and pf.gotIdx == pf.ni then
+      completeFrame(pf)
+      if key == 0 then framesCompleted = framesCompleted + 1 end
+    end
   elseif t == "W" then
     local ok = string.byte(data, 2) == 1
     local msg, path = string.match(string.sub(data, 3), "^([^%z]*)%z([^%z]*)")
@@ -632,7 +742,11 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     local t0 = os.clock()
     local r = blendedFrame(pf)
     profBlend = profBlend + (os.clock() - t0)
-    if r then buildMesh(key, r) end
+    if r and r.verts then
+      buildMesh(key, r)
+    elseif r and meshes[key] and meshes[key].obj then
+      meshes[key].obj:setPosition(r.pos)
+    end
   end
 
   -- smooth the meshes between 30 Hz frames
@@ -646,7 +760,33 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     end
   end
 
+  -- motion trace for measuring smoothness (what was actually drawn this frame)
+  if traceOn then
+    local e = meshes[0]
+    local cp = commands.isFreeCamera() and core_camera.getPosition() or nil
+    local mp = e and e.obj and e.obj:getPosition()
+    local pf = pendingFrames[0]
+    local _, _, al = pairFor(pf or {})
+    al = al or -1
+    local ahead = (pf and pf.cur) and (renderTime() - pf.cur.t) or 0
+    trace[#trace + 1] = { simTime, dt, mp and mp.x or 0, mp and mp.y or 0, mp and mp.z or 0, cp and cp.x or 0, cp and cp.y or 0, cp and cp.z or 0,
+      al, ahead, pf and pf.cur and pf.cur.t or 0 }
+    if #trace > 600 then table.remove(trace, 1) end
+  end
+
   sendRaw("P")
+  if pendingActivateId and simTime >= pendingActivateAt then
+    local veh = be:getObjectByID(pendingActivateId)
+    if not veh then
+      pendingActivateId = nil
+    elseif (worldReadyState == nil or worldReadyState == 2) and groundUnder(veh:getPosition()) then
+      pendingActivateId = nil
+      finishActivate(veh)
+    else
+      if not waitingLogged then log("I", logTag, "waiting for the level to finish loading before spawning Mario") waitingLogged = true end
+      pendingActivateAt = simTime + 0.5
+    end
+  end
   if not active then return end
   local stub = stubId and be:getObjectByID(stubId)
   if not stub then deactivate() return end
@@ -677,6 +817,11 @@ local function onHull(id, cell, x0, y0, bottom, nx, ny, csv, index, count)
   hullCount = hullCount + 1
   hullPieces[id] = count
   sendRaw("U" .. packU32(id) .. packF(cell, x0, y0, bottom) .. packU16(nx) .. packU16(ny) .. string.char(index, count) .. packF(unpack(vals)))
+end
+
+local function onWorldReadyState(state)
+  -- nothing to do here: finishActivate polls worldReadyState; kept so a level reload re-checks promptly
+  if state == 2 and pendingActivateId then pendingActivateAt = simTime end
 end
 
 local function onVehicleSpawned(vid)
@@ -745,7 +890,7 @@ local function getStatus()
   return {
     connected = connected, active = active, stubId = stubId, material = materialName,
     pos = f and { f.pos.x, f.pos.y, f.pos.z }, health = f and f.health, action = f and f.action,
-    numVerts = f and f.numVerts, frameAge = f and (simTime - localFrameTime), hits = hitCount, hurts = hurtCount, hulls = hullCount, carDents = carDentCount, meshBuilds = meshBuilds, hullPieces = hullPieces, profCreate = profCreate, profBlend = profBlend,
+    numVerts = f and f.numVerts, frameAge = f and (simTime - localFrameTime), hits = hitCount, hurts = hurtCount, hulls = hullCount, carDents = carDentCount, meshBuilds = meshBuilds, hullPieces = hullPieces, profCreate = profCreate, profBlend = profBlend, framesStarted = framesStarted, framesCompleted = framesCompleted,
     meshes = (function() local n = 0 for _ in pairs(meshes) do n = n + 1 end return n end)(),
   }
 end
@@ -755,12 +900,15 @@ M.onVehicleSpawned = onVehicleSpawned
 M.onVehicleSwitched = onVehicleSwitched
 M.onVehicleDestroyed = onVehicleDestroyed
 M.onVehicleResetted = onVehicleResetted
+M.onWorldReadyState = onWorldReadyState
 M.onExtensionLoaded = onExtensionLoaded
 M.onExtensionUnloaded = onExtensionUnloaded
 M.onClientEndMission = onClientEndMission
 M.scriptInput = scriptInput
 M.teleport = teleport
 M.getStatus = getStatus
+M.startTrace = function() trace = {} traceOn = true end
+M.getTrace = function() traceOn = false local out = {} for i, r in ipairs(trace) do out[i] = table.concat(r, ' ') end return table.concat(out, string.char(10)) end
 M.onRemote = onRemote
 M.onHull = onHull
 M.onRemoteGone = onRemoteGone
