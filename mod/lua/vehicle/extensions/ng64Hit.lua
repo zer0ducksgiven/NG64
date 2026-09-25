@@ -19,6 +19,7 @@ local function tune(dent, shove, nodes)
 end
 
 local pending = {}
+local carryUpdate, throwUpdate   -- defined with the carry code further down
 
 local function hit(px, py, pz, dx, dy, dz, strength, shoveScale)
   local d = vec3(dx, dy, dz)
@@ -46,6 +47,8 @@ local function hit(px, py, pz, dx, dy, dz, strength, shoveScale)
 end
 
 local function updateGFX(dt)
+  carryUpdate(dt)
+  throwUpdate(dt)
   if #pending == 0 then return end
   local nodeCount = obj:getNodeCount()
   for i = #pending, 1, -1 do
@@ -212,13 +215,95 @@ local function sendHull()
   end
 end
 
+-- ------------------------------------------------------------------------------------------------------------------
+-- Being carried by Mario: every node of the carried piece is pulled (damped spring, gravity cancelled) towards where
+-- it sat relative to the piece's centre when he picked it up, re-placed at his hold point and turned with him. The
+-- piece keeps its shape and stays a normal soft body - it can still dent and hit things while he carries it.
+local CARRY_K = 90        -- 1/s^2
+local CARRY_C = 19        -- 1/s (about critically damped)
+local THROW_TIME = 0.05
+
+local carry            -- { nodes = { {cid, mass, offx, offy, offz} }, lift, yaw0, target, yaw }
+
+local function carryStart(piece)
+  local nodeCount = obj:getNodeCount()
+  local list = pieces(nodeCount)
+  local nodes = list[(piece or 0) + 1] or list[1]
+  if not nodes then return end
+  local base = obj:getPosition()
+  local com, mass, minZ = vec3(0, 0, 0), 0, math.huge
+  for _, cid in ipairs(nodes) do
+    local m = obj:getNodeMass(cid)
+    local p = base + obj:getNodePosition(cid)
+    com = com + p * m
+    mass = mass + m
+    if p.z < minZ then minZ = p.z end
+  end
+  if mass <= 0 then return end
+  com = com / mass
+  carry = { nodes = {}, lift = com.z - minZ }
+  for _, cid in ipairs(nodes) do
+    local p = base + obj:getNodePosition(cid)
+    carry.nodes[#carry.nodes + 1] = { cid, obj:getNodeMass(cid), p.x - com.x, p.y - com.y, p.z - com.z }
+  end
+end
+
+local function carryTarget(x, y, z, yaw)
+  if not carry then return end
+  if not carry.yaw0 then carry.yaw0 = yaw end
+  carry.target = vec3(x, y, z + carry.lift)   -- (x, y, z) is where its underside should be
+  carry.yaw = yaw
+end
+
+carryUpdate = function(dt)
+  if not carry or not carry.target then return end
+  local base = obj:getPosition()
+  local a = carry.yaw - carry.yaw0
+  local ca, sa = math.cos(a), math.sin(a)
+  local t = carry.target
+  for _, n in ipairs(carry.nodes) do
+    local cid, m = n[1], n[2]
+    local want = vec3(t.x + n[3] * ca - n[4] * sa, t.y + n[3] * sa + n[4] * ca, t.z + n[5])
+    local p = base + obj:getNodePosition(cid)
+    local vel = obj:getNodeVelocityVector(cid)
+    local acc = (want - p) * CARRY_K - vel * CARRY_C + vec3(0, 0, 9.81)
+    obj:applyForceVectorTime(cid, acc * m, dt)
+  end
+end
+
+local function carryRelease(vx, vy, vz)
+  if not carry then return end
+  -- give the whole piece the throw velocity (over a few physics steps), then let it fly
+  local sum, mass = vec3(0, 0, 0), 0
+  for _, n in ipairs(carry.nodes) do
+    sum = sum + obj:getNodeVelocityVector(n[1]) * n[2]
+    mass = mass + n[2]
+  end
+  local dv = vec3(vx, vy, vz) - (mass > 0 and sum / mass or vec3(0, 0, 0))
+  carry.throw = { dv = dv, t = THROW_TIME }
+  carry.target = nil
+end
+
+throwUpdate = function(dt)
+  if not carry or not carry.throw then return end
+  local th = carry.throw
+  local step = math.min(dt, th.t)
+  for _, n in ipairs(carry.nodes) do obj:applyForceVectorTime(n[1], th.dv * (n[2] / THROW_TIME), step) end
+  th.t = th.t - step
+  if th.t <= 1e-4 then carry = nil end
+end
+
 local function onReset()
   pending = {}
+  carry = nil
 end
 
 M.hit = hit
 M.tune = tune
 M.sendHull = sendHull
+M.carryStart = carryStart
+M.carryTarget = carryTarget
+M.carryRelease = carryRelease
 M.updateGFX = updateGFX
 M.onReset = onReset
 return M

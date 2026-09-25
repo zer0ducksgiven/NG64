@@ -319,6 +319,49 @@ stalls = sum(1 for v in sp if v < 0.25 * statistics.mean(sp))
 jit = statistics.pstdev(sp) / statistics.mean(sp)
 check(stalls == 0 and jit < 0.35, "Mario moves every rendered frame at an even speed (%d stalled of %d, jitter %.2f)" % (stalls, len(sp), jit))
 
+# -- carrying: Y lifts the car overhead (SM64 heavy lift), it follows him, Y throws it ------------------------------
+def centre():
+    return [float(v) for v in lua("local c=vec3(be:getObjectOOBBCenterXYZ(%s)) return string.format('%%f %%f %%f', c.x,c.y,c.z)" % carId).split()[-3:]]
+lua("ng64.scriptInput(0,0,false,false,false,2,1,0,true)")          # Y with nothing in reach: nothing happens
+time.sleep(1.0)
+check(status().get("carrying") is None, "Y with nothing in reach does nothing")
+fresh_car()
+cx, cy, cz, nx, ny, half, fx, fy = car_geo()
+lua("ng64.teleport(%f,%f,%f)" % (cx + nx * (half + 0.45), cy + ny * (half + 0.45), mz + 0.2))
+time.sleep(1.0)
+lua("ng64.scriptInput(0,-0.2,false,false,false,2,%f,%f)" % (-nx, -ny)); time.sleep(0.4)
+h_before = status()["health"]
+z0 = centre()[2]
+lua("ng64.scriptInput(0,0,false,false,false,2,%f,%f,true)" % (-nx, -ny))
+time.sleep(3.0)
+c1 = centre(); st = status()
+check(str(st.get("carrying")) == carId and c1[2] - z0 > 1.0, "Y lifts the car overhead (carrying %s, centre up %.2f m)" % (st.get("carrying"), c1[2] - z0))
+lua("ng64.scriptInput(0,-1,false,false,false,60,1,0)"); time.sleep(2.5)
+st = status(); c2 = centre()
+gap = ((st["pos"][0] - c2[0]) ** 2 + (st["pos"][1] - c2[1]) ** 2) ** 0.5
+check(gap < 1.5 and c2[2] - z0 > 1.0, "the car goes where he goes (%.2f m from him, still %.2f m up)" % (gap, c2[2] - z0))
+shot("10_carry")
+d0 = damage()
+lua("ng64.scriptInput(0,0,false,false,false,2,1,0,true)")          # Y again: throw
+time.sleep(3.5)
+c3 = centre(); st = status()
+flew = ((c3[0] - c2[0]) ** 2 + (c3[1] - c2[1]) ** 2) ** 0.5
+check(st.get("carrying") is None and st.get("throws", 0) >= 1 and flew > 8, "Y again throws it (%.1f m)" % flew)
+check(damage() > d0, "the thrown car crashes (damage %.0f -> %.0f)" % (d0, damage()))
+check(status()["health"] == h_before, "carrying and throwing didn't hurt Mario (health %s)" % status()["health"])
+# Z puts it down instead of throwing
+fresh_car()
+cx, cy, cz, nx, ny, half, fx, fy = car_geo()
+lua("ng64.teleport(%f,%f,%f)" % (cx + nx * (half + 0.45), cy + ny * (half + 0.45), mz + 0.2))
+time.sleep(1.0)
+lua("ng64.scriptInput(0,-0.2,false,false,false,2,%f,%f)" % (-nx, -ny)); time.sleep(0.4)
+lua("ng64.scriptInput(0,0,false,false,false,2,%f,%f,true)" % (-nx, -ny)); time.sleep(3.0)
+c4 = centre()
+lua("ng64.scriptInput(0,0,false,false,true,3)"); time.sleep(3.0)
+c5 = centre(); st = status()
+check(st.get("carrying") is None and ((c5[0] - c4[0]) ** 2 + (c5[1] - c4[1]) ** 2) ** 0.5 < 2.5,
+      "Z sets it down where he stands (moved %.1f m)" % (((c5[0] - c4[0]) ** 2 + (c5[1] - c4[1]) ** 2) ** 0.5))
+
 # -- a wreck in two pieces: two hulls, and the gap between them is open ------------------------------------------
 fresh_car()
 cx, cy, cz, nx, ny, half, fx, fy = car_geo()

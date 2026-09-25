@@ -186,6 +186,40 @@ try:
     check(f0 is not None and f0[11] == 0x010208BE, "hit by car: thrown backward (action 0x%x)" % (f0[11] if f0 else 0))
     check(f1 is not None and f1[3] > -1.0, "thrown clear along the car's travel x=%.2f" % (f1[3] if f1 else 0))
 
+    # carry: stand facing the car's side, Y -> SM64 pick-up (heavy: main body), hold messages, Y again -> heavy throw
+    def collect(seconds, keep_veh=True):
+        frames_, carries, want, end = [], [], int(seconds * 30), time.time() + seconds * 4
+        while len(frames_) < want and time.time() < end:
+            if keep_veh: veh()
+            s.setblocking(False)
+            try:
+                for _ in range(400):
+                    d, _ = s.recvfrom(65536)
+                    if d[0:1] == b"F": frames_.append(struct.unpack_from("<BIIfffffffhIhhI", d))
+                    elif d[0:1] == b"C": carries.append(struct.unpack_from("<BBIBB3ff3f", d))
+            except (BlockingIOError, socket.timeout): pass
+            s.settimeout(2.0)
+            time.sleep(0.01)
+        return frames_, carries
+    s.sendto(b"M" + struct.pack("<fff", 0, 3.3, 10.2), dst)
+    collect(1.0)
+    s.sendto(b"I" + struct.pack("<ffBBBHff", 0, -0.2, 0, 0, 0, 2, 0, 1), dst)   # face the car (+y)
+    collect(0.4)
+    s.sendto(b"I" + struct.pack("<ffBBBHffB", 0, 0, 0, 0, 0, 2, 0, 1, 1), dst)  # press Y
+    fr, cs = collect(2.0)
+    acts = {f[11] for f in fr}
+    starts = [c for c in cs if c[1] == 1]; holds = [c for c in cs if c[1] == 2]
+    check(0x383 in acts and 0x08000208 in acts, "Y: SM64 pick-up then heavy hold (actions %s)" % sorted(hex(a) for a in acts))
+    check(starts and starts[0][2] == 7 and starts[0][4] == 1, "carry start sent for vehicle 7, heavy (%s)" % (starts[:1],))
+    hz = holds[-1][7] if holds else None
+    check(holds and hz is not None and hz > 11.0, "hold point is overhead (z %s, Mario at 10)" % hz)
+    s.sendto(b"I" + struct.pack("<ffBBBHffB", 0, 0, 0, 0, 0, 2, 0, 1, 1), dst)  # Y again: throw
+    fr, cs = collect(2.0)
+    acts = {f[11] for f in fr}
+    rel = [c for c in cs if c[1] == 3]
+    check(0x80000589 in acts, "Y while carrying: SM64 heavy throw (actions %s)" % sorted(hex(a) for a in acts))
+    check(rel and rel[0][10] > 8.0, "release sent with a forward throw velocity (vy %.1f m/s)" % (rel[0][10] if rel else 0))
+
     # wrecked into two pieces (cab in front, bed box behind, 2 m of nothing between them): two hulls, and the gap
     # between them is open ground, not an invisible floor
     cab = [1.5] * (4 * 2)

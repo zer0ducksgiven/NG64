@@ -30,6 +30,7 @@ typedef struct {
 typedef struct { uint8_t type; uint32_t key; uint32_t seq; uint16_t start; uint16_t count; } ng64_ChunkHeader;
 typedef struct { int16_t p[3]; int8_t n[3]; uint16_t uv[2]; } ng64_PackedVert;
 typedef struct { uint8_t type; uint32_t vehId; float point[3]; float dir[3]; float strength; } ng64_Hit;
+typedef struct { uint8_t type; uint8_t kind; uint32_t vehId; uint8_t piece; uint8_t heavy; float point[3]; float yaw; float vel[3]; } ng64_Carry;
 #pragma pack(pop)
 ]])
 local CHUNK_HEADER_SIZE = ffi.sizeof("ng64_ChunkHeader")
@@ -120,6 +121,7 @@ end
 local hdrBuf = ffi.new("ng64_FrameHeader")
 local chunkHdrBuf = ffi.new("ng64_ChunkHeader")
 local hitBuf = ffi.new("ng64_Hit")
+local carryBuf = ffi.new("ng64_Carry")
 local chunkVerts = ffi.new("ng64_PackedVert[?]", 600)
 
 local chunkIdx = ffi.new("uint16_t[?]", 3000)
@@ -633,6 +635,35 @@ end
 -- ------------------------------------------------------------------------------------------------------------
 -- packets
 
+-- Mario carrying a car / wreck piece: the helper decides (SM64 does the lift, carry, throw), the car's own Lua
+-- holds the piece at the point it's given and applies the throw
+local carryingId
+local carryCount, throwCount = 0, 0   -- for UAT
+local function onCarry(c)
+  local id = tonumber(c.vehId)
+  local veh = be:getObjectByID(id)
+  if not veh then return end
+  local kind = c.kind
+  if kind == 1 then
+    carryingId = id
+    carryCount = carryCount + 1
+    hitGrace[id] = math.huge   -- it's in his hands: never "hitting" him
+    veh:queueLuaCommand(string.format("if not ng64Hit then extensions.load('ng64Hit') end ng64Hit.carryStart(%d)", c.piece))
+    log("I", logTag, string.format("mario picked up vehicle %d piece %d", id, c.piece))
+  elseif kind == 2 then
+    -- sm64 facing -> heading in the world: sm64 forward (sin f, cos f) maps to bng (sin f, -cos f)
+    local f = c.yaw
+    veh:queueLuaCommand(string.format("if ng64Hit then ng64Hit.carryTarget(%f,%f,%f,%f) end",
+      c.point[0], c.point[1], c.point[2], math.atan2(-math.cos(f), math.sin(f))))
+  elseif kind == 3 then
+    carryingId = nil
+    hitGrace[id] = simTime     -- the usual grace after it leaves his hands
+    if c.vel[0] ~= 0 or c.vel[1] ~= 0 then throwCount = throwCount + 1 end
+    veh:queueLuaCommand(string.format("if ng64Hit then ng64Hit.carryRelease(%f,%f,%f) end", c.vel[0], c.vel[1], c.vel[2]))
+    log("I", logTag, string.format("mario released vehicle %d (%.1f, %.1f, %.1f m/s)", id, c.vel[0], c.vel[1], c.vel[2]))
+  end
+end
+
 local function handlePacket(data)
   local t = string.sub(data, 1, 1)
   if t == "F" then
@@ -699,6 +730,10 @@ local function handlePacket(data)
     end
   elseif t == "A" then
     applyHit(data)
+  elseif t == "C" then
+    if #data < ffi.sizeof(carryBuf) then return end
+    ffi.copy(carryBuf, data, ffi.sizeof(carryBuf))
+    onCarry(carryBuf)
   elseif t == "P" then
     -- keepalive reply
   elseif t == "L" then
@@ -873,8 +908,8 @@ local function onClientEndMission()
 end
 
 -- UAT / console helpers
-local function scriptInput(stickX, stickY, a, b, z, frames, dirX, dirY)
-  local extra = dirX and packF(dirX, dirY) or ""
+local function scriptInput(stickX, stickY, a, b, z, frames, dirX, dirY, y)
+  local extra = dirX and (packF(dirX, dirY) .. (y and string.char(1) or "")) or ""
   sendRaw("I" .. packF(stickX or 0, stickY or 0) .. string.char(a and 1 or 0, b and 1 or 0, z and 1 or 0) .. packU16(frames or 1) .. extra)
 end
 
@@ -890,7 +925,7 @@ local function getStatus()
   return {
     connected = connected, active = active, stubId = stubId, material = materialName,
     pos = f and { f.pos.x, f.pos.y, f.pos.z }, health = f and f.health, action = f and f.action,
-    numVerts = f and f.numVerts, frameAge = f and (simTime - localFrameTime), hits = hitCount, hurts = hurtCount, hulls = hullCount, carDents = carDentCount, meshBuilds = meshBuilds, hullPieces = hullPieces, profCreate = profCreate, profBlend = profBlend, framesStarted = framesStarted, framesCompleted = framesCompleted,
+    numVerts = f and f.numVerts, frameAge = f and (simTime - localFrameTime), hits = hitCount, hurts = hurtCount, hulls = hullCount, carDents = carDentCount, meshBuilds = meshBuilds, hullPieces = hullPieces, carrying = carryingId, carries = carryCount, throws = throwCount, profCreate = profCreate, profBlend = profBlend, framesStarted = framesStarted, framesCompleted = framesCompleted,
     meshes = (function() local n = 0 for _ in pairs(meshes) do n = n + 1 end return n end)(),
   }
 end

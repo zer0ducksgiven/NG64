@@ -1,0 +1,60 @@
+--- a/src/libsm64.c
++++ b/src/libsm64.c
+@@ -725,3 +725,43 @@
+ {
+     gAudioVolume = vol;
+ }
++
++// ---- NG64: carrying things that aren't SM64 objects ----------------------------------------------------------------
++// SM64's hold/carry/throw actions dereference m->heldObj, so Mario gets a zeroed placeholder object per instance.
++// Heavy sets INT_SUBTYPE_GRABS_MARIO, which is what SM64 uses to pick the overhead heavy lift and heavy walk.
++#include "decomp/include/object_fields.h"
++#include "decomp/game/interaction.h"
++
++#define NG64_MAX_HELD 64
++static struct Object s_ng64_held[NG64_MAX_HELD];
++
++static bool ng64_bind(int32_t marioId)
++{
++    if( marioId < 0 || marioId >= s_mario_instance_pool.size || s_mario_instance_pool.objects[marioId] == NULL ) return false;
++    global_state_bind( ((struct MarioInstance *)s_mario_instance_pool.objects[ marioId ])->globalState );
++    return true;
++}
++
++SM64_LIB_FN void sm64_mario_pick_up(int32_t marioId, bool heavy)
++{
++    if( !ng64_bind( marioId ) || marioId >= NG64_MAX_HELD ) return;
++    struct Object *o = &s_ng64_held[marioId];
++    memset( o, 0, sizeof( *o ));
++    o->oInteractionSubtype = heavy ? INT_SUBTYPE_GRABS_MARIO : 0;
++    gMarioState->heldObj = NULL;
++    gMarioState->usedObj = o;
++    set_mario_action( gMarioState, ACT_PICKING_UP, 0 );
++}
++
++SM64_LIB_FN bool sm64_mario_is_holding(int32_t marioId)
++{
++    if( !ng64_bind( marioId )) return false;
++    return gMarioState->heldObj != NULL || gMarioState->action == ACT_PICKING_UP;
++}
++
++SM64_LIB_FN void sm64_mario_drop_held(int32_t marioId)
++{
++    if( !ng64_bind( marioId )) return;
++    mario_drop_held_object( gMarioState );
++    if( gMarioState->action == ACT_PICKING_UP ) set_mario_action( gMarioState, ACT_IDLE, 0 );
++}
+--- a/src/libsm64.h
++++ b/src/libsm64.h
+@@ -180,6 +180,11 @@
+ extern SM64_LIB_FN void sm64_mario_extend_cap(int32_t marioId, uint16_t capTime);
+ extern SM64_LIB_FN bool sm64_mario_attack(int32_t marioId, float x, float y, float z, float hitboxHeight);
+ 
++// NG64 additions: carry something that isn't an SM64 object (heavy = overhead lift / heavy walk)
++extern SM64_LIB_FN void sm64_mario_pick_up(int32_t marioId, bool heavy);
++extern SM64_LIB_FN bool sm64_mario_is_holding(int32_t marioId);
++extern SM64_LIB_FN void sm64_mario_drop_held(int32_t marioId);
++
+ extern SM64_LIB_FN uint32_t sm64_surface_object_create( const struct SM64SurfaceObject *surfaceObject );
+ extern SM64_LIB_FN void sm64_surface_object_move( uint32_t objectId, const struct SM64ObjectTransform *transform );
+ extern SM64_LIB_FN void sm64_surface_object_delete( uint32_t objectId );

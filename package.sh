@@ -2,6 +2,7 @@
 # Builds the helper and packs the BeamNG mod zip + release folder into dist/.
 set -e
 cd "$(dirname "$0")"
+./tools/lint_lua.sh $(find mod server -name "*.lua")
 ./helper/build.sh
 rm -rf dist && mkdir -p dist/NG64
 (cd mod && /c/msys64/usr/bin/zip -qr ../dist/ng64.zip . -x '*.git*')

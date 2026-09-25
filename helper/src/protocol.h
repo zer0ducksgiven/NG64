@@ -30,6 +30,7 @@
 #define MSG_INDEX     'J'  // ChunkHeader then count * u16 (corner -> unique vertex)
 #define MSG_HIT       'A'  // u32 vehId; f32 point[3]; f32 dir[3]; f32 strength (bng)
 #define MSG_LOG       'L'  // str\0
+#define MSG_CARRY     'C'  // u8 kind (1 start, 2 hold, 3 release); u32 vehId; u8 piece; u8 heavy; f32 point[3]; f32 yaw; f32 vel[3] (bng)
 
 #pragma pack(push, 1)
 typedef struct {

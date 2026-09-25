@@ -22,6 +22,8 @@ int png_write_rgba(const char *path, const uint8_t *rgba, int w, int h);
 int ng64_audio_start(const uint8_t *rom);
 void ng64_audio_stop(void);
 
+extern uint32_t s_tick;   // simulation tick, defined with the frame sender
+
 #define PI 3.14159265f
 #define S  NG64_SCALE
 
@@ -358,6 +360,9 @@ typedef struct {
     int numHulls;
     DWORD lastSeen;
     int hitCooldown;
+    int held;              // being carried: no collision surfaces at all
+    int collideAfterPending; // surfaces already released for the carry
+    uint32_t collideAfter; // tick when collision comes back after a carry
 } Vehicle;
 static Vehicle s_veh[MAX_VEH];
 
@@ -494,7 +499,20 @@ static void update_vehicles(const uint8_t *p, int len)
             if (s_veh[i].used && s_veh[i].vehId == id) { veh = &s_veh[i]; break; }
             if (!s_veh[i].used && !freeSlot) freeSlot = &s_veh[i];
         }
-        int rebuild = !veh;
+        extern uint32_t s_tick;
+        if (veh && (veh->held || s_tick < veh->collideAfter)) {
+            // carried (or just thrown): keep the frame current for when collision comes back, but no surfaces
+            memcpy(veh->center, center, 12); memcpy(veh->axes, axes, sizeof(axes)); memcpy(veh->half, half, 12);
+            bng2sm(org, veh->framePos); frame_rows(fwdB, upB, veh->frameRows);
+            memcpy(veh->orgB, org, 12); memcpy(veh->fwdB, fwdB, 12); memcpy(veh->upB, upB, 12);
+            veh->rightB[0] = fwdB[1] * upB[2] - fwdB[2] * upB[1];
+            veh->rightB[1] = fwdB[2] * upB[0] - fwdB[0] * upB[2];
+            veh->rightB[2] = fwdB[0] * upB[1] - fwdB[1] * upB[0];
+            veh->lastSeen = now;
+            continue;
+        }
+        int rebuild = !veh || veh->collideAfter;   // collideAfter set = its surfaces were removed for a carry
+        if (veh) veh->collideAfter = 0;
         if (veh && !veh->isHull)
             for (int a = 0; a < 3; a++) if (fabsf(veh->half[a] - half[a]) > 8.0f) rebuild = 1;
         if (!veh && !freeSlot) continue;
@@ -512,7 +530,8 @@ static void update_vehicles(const uint8_t *p, int len)
         veh->rightB[2] = fwdB[0] * upB[1] - fwdB[1] * upB[0];
         if (rebuild) {
             // bounding box until the vehicle sends its hull
-            if (veh->used) vehicle_release(veh);
+            if (veh->used && !veh->collideAfterPending) vehicle_release(veh);
+            veh->collideAfterPending = 0;
             struct SM64Surface surfs[12];
             int n;
             box_surfaces(half, surfs, &n);
@@ -554,7 +573,8 @@ static void load_hull(const uint8_t *p, int len)
     int index = p[24], count = p[25];
     if (nx < 1 || ny < 1 || nx > 64 || ny > 64 || index >= MAX_HULLS || count > MAX_HULLS || index >= count || len < 26 + nx * ny * 4) return;
     Vehicle *veh = vehicle_find(id);
-    if (!veh) return;
+    extern uint32_t s_tick;
+    if (!veh || veh->held || s_tick < veh->collideAfter) return;
 
     if (!veh->isHull) {
         // first hull replaces the bounding box
@@ -597,7 +617,7 @@ static int vehicle_push_out(Mario *m)
     sm2bng(m->state.position, b);
     for (int v = 0; v < MAX_VEH; v++) {
         Vehicle *veh = &s_veh[v];
-        if (!veh->used || !veh->isHull) continue;
+        if (!veh->used || !veh->isHull || veh->held) continue;
         float d[3] = { b[0] - veh->orgB[0], b[1] - veh->orgB[1], b[2] - veh->orgB[2] };
         float lx = d[0] * veh->rightB[0] + d[1] * veh->rightB[1] + d[2] * veh->rightB[2];
         float ly = d[0] * veh->fwdB[0] + d[1] * veh->fwdB[1] + d[2] * veh->fwdB[2];
@@ -704,6 +724,7 @@ static void check_attacks(Mario *m)
     for (int i = 0; i < MAX_VEH; i++) {
         Vehicle *v = &s_veh[i];
         if (!v->used) continue;
+        if (v->held) continue;
         if (v->hitCooldown > 0) { v->hitCooldown--; continue; }
         float closest[3];
         if (strength > 0) {
@@ -729,7 +750,7 @@ static void check_attacks(Mario *m)
 typedef DWORD(WINAPI *XInputGetStateFn)(DWORD, XINPUT_STATE *);
 static XInputGetStateFn s_xinputGetState;
 
-typedef struct { float lx, ly, rx, ry; int a, b, z, zoomIn, zoomOut; } Pad;
+typedef struct { float lx, ly, rx, ry; int a, b, z, zoomIn, zoomOut, y; } Pad;
 
 static float deadzone(SHORT v, SHORT dz)
 {
@@ -767,6 +788,7 @@ static void read_pad(Pad *p)
             p->z = g->bRightTrigger > 64 || g->bLeftTrigger > 64;
             p->zoomIn = (g->wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER) != 0;
             p->zoomOut = (g->wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER) != 0;
+            p->y = (g->wButtons & XINPUT_GAMEPAD_Y) != 0;
             break;
         }
     }
@@ -778,11 +800,140 @@ static void read_pad(Pad *p)
     if (KEY(VK_SPACE)) p->a = 1;
     if (KEY('J')) p->b = 1;
     if (KEY('K')) p->z = 1;
+    if (KEY('E')) p->y = 1;
     if (KEY(VK_LEFT)) p->rx = -1;
     if (KEY(VK_RIGHT)) p->rx = 1;
     if (KEY(VK_UP)) p->ry = 1;
     if (KEY(VK_DOWN)) p->ry = -1;
 #undef KEY
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// carrying cars and wreck pieces (Y / E). SM64 does the lift, carry, heavy walk, throw (B) and put-down (Z); the
+// vehicle's own Lua holds the piece at the point sent here and applies the throw.
+#define ACT_FLAG_THROWING_BIT 0x80000000u
+#define CARRY_REACH_M 1.0f
+
+static struct { int active; uint32_t vehId; int piece, heavy; } s_carry;
+static int s_injectB, s_prevY, s_scriptY, s_prevZ, s_effZ;   // s_effZ: Z as fed to SM64 this tick (pad or script)
+#define ACT_IDLE_NG64 0x0C400201
+
+static void send_carry(int kind, const Vehicle *v, int piece, int heavy, const float *pointB, float yaw, const float *velB)
+{
+    uint8_t buf[1 + 1 + 4 + 1 + 1 + 12 + 4 + 12];
+    float zero[3] = { 0, 0, 0 };
+    buf[0] = MSG_CARRY;
+    buf[1] = (uint8_t)kind;
+    memcpy(buf + 2, &v->vehId, 4);
+    buf[6] = (uint8_t)piece;
+    buf[7] = (uint8_t)heavy;
+    memcpy(buf + 8, pointB ? pointB : zero, 12);
+    memcpy(buf + 20, &yaw, 4);
+    memcpy(buf + 24, velB ? velB : zero, 12);
+    send_raw(buf, sizeof(buf));
+}
+
+// nearest carryable piece in front of Mario: distance from a point just ahead of him to each hull piece's footprint
+static Vehicle *carry_target(const Mario *m, int *pieceOut)
+{
+    const struct SM64MarioState *st = &m->state;
+    float ahead[3] = { st->position[0] + sinf(st->faceAngle) * 50, st->position[1] + 40, st->position[2] + cosf(st->faceAngle) * 50 };
+    float b[3];
+    sm2bng(ahead, b);
+    Vehicle *best = NULL;
+    float bestD = CARRY_REACH_M;
+    for (int v = 0; v < MAX_VEH; v++) {
+        Vehicle *veh = &s_veh[v];
+        if (!veh->used || veh->held) continue;
+        float d[3] = { b[0] - veh->orgB[0], b[1] - veh->orgB[1], b[2] - veh->orgB[2] };
+        float lx = d[0] * veh->rightB[0] + d[1] * veh->rightB[1] + d[2] * veh->rightB[2];
+        float ly = d[0] * veh->fwdB[0] + d[1] * veh->fwdB[1] + d[2] * veh->fwdB[2];
+        float lz = d[0] * veh->upB[0] + d[1] * veh->upB[1] + d[2] * veh->upB[2];
+        if (!veh->isHull) {
+            float closest[3], sp[3];
+            bng2sm(b, sp);
+            point_near_box(veh, sp, 0, closest);
+            float dx = (closest[0] - sp[0]) * S, dy = (closest[1] - sp[1]) * S, dz = (closest[2] - sp[2]) * S;
+            float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+            if (dist < bestD) { bestD = dist; best = veh; *pieceOut = 0; }
+            continue;
+        }
+        for (int h = 0; h < veh->numHulls; h++) {
+            const Hull *hl = &veh->hulls[h];
+            if (!hl->top) continue;
+            float x1 = hl->x0 + hl->nx * hl->cell, y1 = hl->y0 + hl->ny * hl->cell;
+            float dx = lx < hl->x0 ? hl->x0 - lx : lx > x1 ? lx - x1 : 0;
+            float dy = ly < hl->y0 ? hl->y0 - ly : ly > y1 ? ly - y1 : 0;
+            float dz = lz < hl->bottom - 0.3f ? hl->bottom - 0.3f - lz : 0;
+            float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+            if (dist < bestD) { bestD = dist; best = veh; *pieceOut = h; }
+        }
+    }
+    return best;
+}
+
+static void carry_update(Mario *m, const Pad *pad)
+{
+    const struct SM64MarioState *st = &m->state;
+    int yEdge = (pad->y || s_scriptY) && !s_prevY;
+    s_prevY = pad->y || s_scriptY;
+    s_scriptY = 0;
+    Vehicle *v = s_carry.active ? vehicle_find(s_carry.vehId) : NULL;
+    if (s_carry.active && !v) { s_carry.active = 0; sm64_mario_drop_held(m->id); return; }   // the car was removed
+
+    if (!s_carry.active) {
+        if (!yEdge || (st->action & ACT_FLAG_AIR)) return;
+        int piece = 0;
+        v = carry_target(m, &piece);
+        if (!v) return;
+        // the main body lifts overhead (heavy); a piece that came off lifts like a crate
+        int heavy = piece == 0;
+        sm64_mario_pick_up(m->id, heavy != 0);
+        s_carry.active = 1; s_carry.vehId = v->vehId; s_carry.piece = piece; s_carry.heavy = heavy;
+        vehicle_release(v);            // no collision while it's in his hands
+        v->held = 1;
+        v->collideAfterPending = 1;
+        send_carry(1, v, piece, heavy, NULL, st->faceAngle, NULL);
+        logf_("picked up vehicle %u piece %d (%s)", v->vehId, piece, heavy ? "heavy" : "light");
+        return;
+    }
+
+    if (sm64_mario_is_holding(m->id)) {
+        if (yEdge) s_injectB = 1;   // Y again throws, same as B
+        // SM64 has no put-down for heavy things (B throws, Z does nothing); Z lets go of a car here. Light pieces
+        // keep SM64's own put-down.
+        int zEdge = s_effZ && !s_prevZ;
+        s_prevZ = s_effZ;
+        if (s_carry.heavy && zEdge && st->action == 0x08000208 /* ACT_HOLD_HEAVY_IDLE */) {
+            sm64_mario_drop_held(m->id);
+            sm64_set_mario_action(m->id, ACT_IDLE_NG64);
+        }
+        // where the piece's underside should be: overhead for a heavy lift, in front of his chest for a light one
+        float fx = sinf(st->faceAngle), fz = cosf(st->faceAngle);
+        float hold[3];
+        if (s_carry.heavy) { hold[0] = st->position[0] + fx * 10; hold[1] = st->position[1] + 175; hold[2] = st->position[2] + fz * 10; }
+        else { hold[0] = st->position[0] + fx * 60; hold[1] = st->position[1] + 60; hold[2] = st->position[2] + fz * 60; }
+        float holdB[3];
+        sm2bng(hold, holdB);
+        send_carry(2, v, s_carry.piece, s_carry.heavy, holdB, st->faceAngle, NULL);
+        return;
+    }
+
+    // let go: a throw sends it flying the way he faces, anything else just leaves it with his own speed
+    float velS[3] = { st->velocity[0] * 30, st->velocity[1] * 30, st->velocity[2] * 30 };
+    int thrown = (st->action & ACT_FLAG_THROWING_BIT) != 0;
+    if (thrown) {
+        float speed = s_carry.heavy ? 1500.0f : 1900.0f;   // units/s: ~13 / ~16 m/s
+        velS[0] += sinf(st->faceAngle) * speed;
+        velS[1] += s_carry.heavy ? 600.0f : 700.0f;
+        velS[2] += cosf(st->faceAngle) * speed;
+    }
+    float velB[3] = { velS[0] * S, -velS[2] * S, velS[1] * S };
+    send_carry(3, v, s_carry.piece, s_carry.heavy, NULL, st->faceAngle, velB);
+    logf_("%s vehicle %u", thrown ? "threw" : "dropped", v->vehId);
+    v->held = 0;
+    v->collideAfter = s_tick + 45;   // collision back 1.5 s later, once it has flown clear of him
+    s_carry.active = 0;
 }
 
 // scripted input (UAT)
@@ -829,7 +980,7 @@ static void update_camera(const Mario *m, const Pad *pad, float dt)
 
 static PackedVert s_vertBuf[SM64_GEO_MAX_TRIANGLES * 3];
 static uint32_t s_seq;
-static uint32_t s_tick;   // advances once per 30 Hz simulation step
+uint32_t s_tick;   // advances once per 30 Hz simulation step
 
 static void send_frame(Mario *m)
 {
@@ -1081,6 +1232,7 @@ static void handle_packet(const uint8_t *p, int len)
             memcpy(&fr, p + 11, 2);
             s_script.frames = fr;
             s_script.absDir = 0;
+            if (len >= 22 && p[21]) s_scriptY = 1;   // optional trailing u8: press Y (tests)
             if (len >= 21) {   // optional world direction (bng x, y) that "stick up" walks along
                 float d[3] = { 0, 0, 0 }, sd[3];
                 memcpy(d, p + 13, 8);
@@ -1219,6 +1371,8 @@ int main(int argc, char **argv)
                     s_script.frames--;
                 }
                 in.stickX = sx; in.stickY = sy;
+                if (s_injectB) { b = 1; s_injectB = 0; }
+                s_effZ = z;
                 in.buttonA = a; in.buttonB = b; in.buttonZ = z;
                 in.camLookX = s_camTarget[0] - s_camPos[0];
                 in.camLookZ = s_camTarget[2] - s_camPos[2];
@@ -1256,6 +1410,7 @@ int main(int argc, char **argv)
             }
             if (m->key == 0) {
                 update_camera(m, &pad, (float)tickSec);
+                carry_update(m, &pad);
                 check_attacks(m);
             }
             send_frame(m);

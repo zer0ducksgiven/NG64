@@ -41,6 +41,7 @@ folder as `Resources/Server/NG64/`. Every player needs the helper running.
 | Z (crouch / ground pound) | RT or LT | K |
 | C buttons (camera) | Right stick | Arrow keys |
 | Camera zoom | RB / LB | — |
+| Pick up / throw | Y | E |
 
 Input is only read while the BeamNG window has focus. To stop playing as Mario, switch to any other vehicle.
 
@@ -73,6 +74,14 @@ Input is only read while the BeamNG window has focus. To stop playing as Mario, 
   The hull is smooth over gentle changes, so only real edges are ledges to grab, and it's sealed down to the
   underside. If Mario still ends up inside a car (it drove into him, a bad landing), he's pushed out through the
   nearest side, or up onto the top if that's a short hop.
+- Picking things up (Y / E): Mario lifts the nearest car or wreck piece in front of him using SM64's own
+  moves. A whole car gets the overhead heavy lift and heavy walk; a piece that came off gets the light carry. Y
+  again or B throws it (SM64's heavy throw); the car flies about 24 m and crashes with normal BeamNG damage. Z
+  sets a heavy car down (SM64 itself has no heavy put-down) and does SM64's put-down for light pieces. While it's
+  in his hands the car has no collision with him and can't hurt him; collision comes back 1.5 s after release.
+  The carried car's own Lua holds it at his hands with a damped spring, so it stays a soft body. Other players
+  don't see the carry yet (local only). libsm64 needs a small addition for this (`helper/patches/libsm64-carry.patch`,
+  applied by `helper/build.sh`): SM64's carry code expects a real held object.
 - Getting run over: SM64's own thrown knockback (the tumble from an explosion), launched along the car's travel
   and scaled by its speed. Only the car's own speed toward Mario counts, so running or sliding into a parked car,
   or a car he just punched away, doesn't hurt him. The hull is re-read every 2 s and right after a hit, so dents change the
