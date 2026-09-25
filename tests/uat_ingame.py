@@ -1,0 +1,252 @@
+"""In-game UAT for NG64, driven through BeamNG's built-in MCP server (launch the game with -enablemcp).
+
+Needs: BeamNG running with ng64.zip installed, ng64helper.exe running with the user's ROM.
+Usage: python uat_ingame.py [--port 29292] [--shots <dir>]
+"""
+import json, sys, time, urllib.request, base64, os, argparse
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--port", type=int, default=29292)
+ap.add_argument("--shots", default=os.path.join(os.path.dirname(__file__), "shots"))
+ap.add_argument("--level", default="gridmap_v2")
+args = ap.parse_args()
+URL = "http://127.0.0.1:%d/mcp" % args.port
+os.makedirs(args.shots, exist_ok=True)
+_id = [0]
+fails = []
+
+
+def rpc(method, params=None, timeout=60):
+    _id[0] += 1
+    body = json.dumps({"jsonrpc": "2.0", "id": _id[0], "method": method, "params": params or {}}).encode()
+    req = urllib.request.Request(URL, body, {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        txt = r.read().decode()
+    if txt.startswith("event:") or txt.startswith("data:"):
+        txt = [l[5:] for l in txt.splitlines() if l.startswith("data:")][-1]
+    return json.loads(txt)
+
+
+def tool(name, **kw):
+    res = rpc("tools/call", {"name": name, "arguments": kw})
+    if "error" in res:
+        raise RuntimeError(res["error"])
+    return res["result"]
+
+
+def text(res):
+    return "".join(c.get("text", "") for c in res.get("content", []) if c.get("type") == "text")
+
+
+def lua(code):
+    return text(tool("run_lua", code=code))
+
+
+def status():
+    raw = lua("return jsonEncode(ng64 and ng64.getStatus() or {missing=true})")
+    try:
+        start = raw.index("{")
+        return json.loads(raw[start:raw.rindex("}") + 1])
+    except Exception:
+        return {"raw": raw}
+
+
+def check(cond, msg):
+    print(("PASS " if cond else "FAIL ") + msg, flush=True)
+    if not cond:
+        fails.append(msg)
+
+
+LOG = []
+
+
+GAME_LOG = None   # resolved from the game's own FS:getUserPath() once connected
+_logStart = [0]
+
+
+def pull_logs():
+    # beamng.log straight from disk, from where this run started
+    if os.path.getsize(GAME_LOG) < _logStart[0]:
+        _logStart[0] = 0   # the game rotated its log after we connected
+    with open(GAME_LOG, "rb") as f:
+        f.seek(_logStart[0])
+        return f.read().decode(errors="replace")
+
+
+def shot(name):
+    try:
+        tool("screenshot_image", scale=0.5)
+        time.sleep(1.5)
+        res = tool("screenshot_image", scale=0.5)
+        for c in res.get("content", []):
+            if c.get("type") == "image":
+                p = os.path.join(args.shots, name + ".jpg")
+                open(p, "wb").write(base64.b64decode(c["data"]))
+                print("  screenshot", p)
+                return p
+        print("  screenshot: no image in", text(res)[:200])
+    except Exception as e:
+        print("  screenshot failed:", e)
+
+
+def wait_for(pred, timeout, step=0.5):
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            v = pred()
+            if v:
+                return v
+        except Exception:
+            pass
+        time.sleep(step)
+    return None
+
+
+# -- connect ------------------------------------------------------------------------------------------------------
+print("waiting for BeamNG MCP on", URL)
+ok = wait_for(lambda: rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "ng64-uat", "version": "1"}}), 300, 2)
+check(bool(ok), "BeamNG MCP reachable")
+if not ok:
+    sys.exit(1)
+
+GAME_LOG = lua("return FS:getUserPath()").strip().replace("\\", "/").rstrip("/") + "/beamng.log"
+_logStart[0] = os.path.getsize(GAME_LOG)
+print("game log:", GAME_LOG)
+check("true" in lua("return tostring(ng64 ~= nil)"), "ng64 extension loaded by modScript")
+
+# -- level ----------------------------------------------------------------------------------------------------------
+if "true" not in lua("return tostring(getMissionFilename() ~= '' and getMissionFilename() ~= nil)"):
+    lua("freeroam_freeroam.startFreeroamByName('%s')" % args.level)
+ok = wait_for(lambda: "true" in lua("return tostring(getPlayerVehicle(0) ~= nil and core_gamestate.state and core_gamestate.state.state == 'freeroam')"), 240, 2)
+check(bool(ok), "freeroam level loaded")
+pull_logs()
+time.sleep(3)
+
+# -- spawn Mario ----------------------------------------------------------------------------------------------------
+lua("core_vehicles.replaceVehicle('ng64_mario', {config='vehicles/ng64_mario/mario.pc'})")
+st = wait_for(lambda: (lambda s: s if s.get("numVerts") else None)(status()), 30)
+check(bool(st), "Mario spawned and rendering: %s" % st)
+if not st:
+    print(lua("return jsonEncode(ng64.getStatus())"))
+    sys.exit(1)
+time.sleep(2)
+st = status()
+check(st.get("material") is not None, "atlas material created (%s)" % st.get("material"))
+check(st.get("frameAge", 9) < 0.2, "frames arriving live (age %.3f s)" % st.get("frameAge", 9))
+z0 = st["pos"][2]
+ground = float(lua("local p=getPlayerVehicle(0):getPosition() return tostring(p.z - castRayStatic(p+vec3(0,0,2), vec3(0,0,-1), 50) + 2)").split()[-1])
+check(abs(z0 - ground) < 0.15, "Mario standing on the map (mario z %.2f, ground %.2f)" % (z0, ground))
+check(st.get("health") == 2176, "full health (%s)" % st.get("health"))
+shot("01_spawned")
+
+# -- jump / run -------------------------------------------------------------------------------------------------------
+lua("ng64.scriptInput(0,0,true,false,false,6)")
+peak = z0
+for _ in range(12):
+    time.sleep(0.05)
+    peak = max(peak, status()["pos"][2])
+check(peak > z0 + 0.5, "jump rises %.2f m" % (peak - z0))
+time.sleep(1.5)
+p0 = status()["pos"]
+lua("ng64.scriptInput(0,-1,false,false,false,75,1,0)")
+time.sleep(1.2)
+shot("02_running")
+time.sleep(1.5)
+p1 = status()["pos"]
+check(p1[0] - p0[0] > 8, "runs along +x %.2f m" % (p1[0] - p0[0]))
+
+# -- car interaction --------------------------------------------------------------------------------------------------
+mx, my, mz = p1
+lua("_ng64uatCar = core_vehicles.spawnNewVehicle('pickup', {pos=vec3(%f,%f,%f), rot=quatFromDir(vec3(1,0,0), vec3(0,0,1)), autoEnterVehicle=false}) return tostring(_ng64uatCar:getID())" % (mx, my + 4.5, mz + 0.5))
+carId = lua("return tostring(_ng64uatCar and _ng64uatCar:getID())").strip().split()[-1]
+check(carId.isdigit(), "spawned test car id %s" % carId)
+time.sleep(4)
+# the stub must stay the player vehicle so Mario stays active
+st = status()
+check(st.get("active") is True, "Mario still active after another vehicle spawned")
+
+# stand 0.5 m off the car's side (its shortest horizontal half-axis), facing it
+side = lua("""local id=%s local c=vec3(be:getObjectOOBBCenterXYZ(id)) local best,bl
+for i=0,2 do local a=vec3(be:getObjectOOBBHalfAxisXYZ(id,i)) if math.abs(a.z)<0.5*a:length() and (not bl or a:length()<bl) then best,bl=a,a:length() end end
+local n=best/bl local p=c+n*(bl+0.5)
+return string.format('%%f %%f %%f %%f %%f', p.x,p.y,n.x,n.y,c.z)""" % carId).split()[-5:]
+sx, sy, nx, ny, ccz = map(float, side)
+lua("ng64.teleport(%f,%f,%f)" % (sx, sy, mz + 0.2))
+time.sleep(0.8)
+lua("ng64.scriptInput(0,-0.2,false,false,false,3,%f,%f)" % (-nx, -ny))
+time.sleep(0.4)
+hits0 = status().get("hits", 0)
+dmg0 = float(lua("return tostring(map.objects[%s] and map.objects[%s].damage or -1)" % (carId, carId)).split()[-1])
+vel0 = lua("return tostring(be:getObjectByID(%s):getVelocity():length())" % carId)
+lua("ng64.scriptInput(0,0,false,true,false,4,%f,%f)" % (-nx, -ny))
+time.sleep(0.25)
+shot("03_punch")
+time.sleep(1.0)
+lua("ng64.scriptInput(0,0,false,true,false,4,%f,%f)" % (-nx, -ny))
+time.sleep(0.5)
+lua("ng64.scriptInput(0,0,false,true,false,4,%f,%f)" % (-nx, -ny))
+time.sleep(1.5)
+logs = pull_logs()
+check(status().get("hits", 0) > hits0, "punch/kick registered on the car (%d hits)" % (status().get("hits", 0) - hits0))
+dmg1 = float(lua("return tostring(map.objects[%s].damage)" % carId).split()[-1])
+check(dmg1 > dmg0, "car took damage %.0f -> %.0f" % (dmg0, dmg1))
+
+# ground pound on the roof
+cp = lua("local p=vec3(be:getObjectOOBBCenterXYZ(%s)) return string.format('%%f %%f %%f', p.x,p.y,p.z)" % carId).split()[-3:]
+cx, cy, cz = map(float, cp)
+lua("ng64.teleport(%f,%f,%f)" % (cx, cy, cz + 3.5))
+time.sleep(0.35)
+lua("ng64.scriptInput(0,0,false,false,true,6)")
+time.sleep(0.15)
+shot("04_groundpound")
+time.sleep(1.5)
+dmg2 = float(lua("return tostring(map.objects[%s].damage)" % carId).split()[-1])
+check(dmg2 > dmg1, "ground pound damaged the car %.0f -> %.0f" % (dmg1, dmg2))
+st = status()
+check(st["pos"][2] > cz + 0.3, "Mario standing on the car roof (z %.2f, car centre %.2f)" % (st["pos"][2], cz))
+shot("05_on_roof")
+
+# car drives into Mario -> Mario gets hurt
+lua("ng64.teleport(%f,%f,%f)" % (cx + 7, cy, mz + 0.2))
+time.sleep(1.5)
+h0 = status()["health"]
+lua("be:getObjectByID(%s):queueLuaCommand(\"if not ng64Hit then extensions.load('ng64Hit') end ng64Hit.hit(%f,%f,%f,1,0,0,9)\")" % (carId, cx - 200, cy, cz))
+hurt = wait_for(lambda: status()["health"] < h0, 4, 0.1)
+shot("06_run_over")
+check(bool(hurt), "vehicle hitting Mario hurts him (health %s -> %s)" % (h0, status()["health"]))
+
+# -- multiplayer (BeamMP) -----------------------------------------------------------------------------------------------
+# outgoing: capture what the mod would send through BeamMP's TriggerServerEvent
+lua("_ng64Sent = {} TriggerServerEvent = function(n, d) table.insert(_ng64Sent, n .. '=' .. d) end")
+time.sleep(1.0)
+sent = lua("return tostring(#_ng64Sent) .. ' ' .. tostring(_ng64Sent[#_ng64Sent])")
+n_sent = int(sent.split()[0])
+check(8 <= n_sent <= 25 and "ng64State=" in sent, "Mario state sent to server at ~15 Hz (%s)" % sent[:90])
+# incoming: another player's Mario standing 3 m from ours, via the same handler BeamMP calls
+mp = status()["pos"]
+lua("ng64.onRemote('7|%f,%f,%f,0,%d,0,0,0')" % (mp[0] + 3, mp[1], mp[2], 0x0C400201))
+time.sleep(0.2)
+for _ in range(10):
+    lua("ng64.onRemote('7|%f,%f,%f,0,%d,0,0,0')" % (mp[0] + 3, mp[1], mp[2], 0x0C400201))
+    time.sleep(0.1)
+st = status()
+check(st.get("meshes", 0) >= 2, "remote player's Mario rendered (%s meshes)" % st.get("meshes"))
+shot("07_remote_mario")
+lua("ng64.onRemoteGone('7')")
+time.sleep(0.5)
+check(status().get("meshes") == 1, "remote Mario removed when the player leaves")
+lua("TriggerServerEvent = nil")
+
+# -- despawn ----------------------------------------------------------------------------------------------------------
+lua("be:enterVehicle(0, _ng64uatCar)")
+time.sleep(1)
+st = status()
+check(st.get("active") is False, "switching to another vehicle hands control back")
+check("true" in lua("return tostring(not commands.isFreeCamera())"), "game camera restored")
+
+errs = pull_logs()
+ng_errs = [l for l in errs.splitlines() if "|E|" in l and "ng64" in l.lower()]
+check(not ng_errs, "no ng64 errors in log %s" % ng_errs[:5])
+
+print("\nFAILURES:", fails if fails else "none")
+sys.exit(1 if fails else 0)

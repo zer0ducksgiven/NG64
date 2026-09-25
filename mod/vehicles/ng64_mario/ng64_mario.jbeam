@@ -1,0 +1,32 @@
+{
+"ng64_mario": {
+    "information": {
+        "authors": "NG64",
+        "name": "Mario (NG64)",
+        "value": 0
+    },
+    "slotType": "main",
+    "refNodes": [
+        ["ref:", "back:", "left:", "up:"],
+        ["ng_ref", "ng_back", "ng_left", "ng_up"]
+    ],
+    "cameraExternal": {
+        "distance": 5, "distanceMin": 2, "offset": {"x": 0, "y": 0, "z": 0.8}, "fov": 65
+    },
+    "nodes": [
+        ["id", "posX", "posY", "posZ"],
+        {"nodeWeight": 5, "collision": false, "selfCollision": false, "fixed": true, "group": "ng64_stub"},
+        ["ng_ref", 0, 0, 0.3],
+        ["ng_back", 0, 0.3, 0.3],
+        ["ng_left", 0.3, 0, 0.3],
+        ["ng_up", 0, 0, 0.6],
+        {"group": ""}
+    ],
+    "beams": [
+        ["id1:", "id2:"],
+        {"beamSpring": 1000000, "beamDamp": 100, "beamDeform": "FLT_MAX", "beamStrength": "FLT_MAX"},
+        ["ng_ref", "ng_back"], ["ng_ref", "ng_left"], ["ng_ref", "ng_up"],
+        ["ng_back", "ng_left"], ["ng_back", "ng_up"], ["ng_left", "ng_up"]
+    ]
+}
+}

@@ -1,0 +1,19 @@
+# the user's ROM and anything extracted from it - never commit
+*.z64
+*.n64
+*.v64
+ng64_cache/
+rom.txt
+
+# third-party sources kept locally (fetch them yourself; see README)
+libsm64-master/
+sm64-san-andreas-master/
+
+# build output
+helper/dist/
+dist/
+tests/Harness/bin/
+tests/Harness/obj/
+tests/shots/
+*.log
+__pycache__/

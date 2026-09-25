@@ -1,0 +1,11 @@
+{
+  "Name": "Mario",
+  "Brand": "NG64",
+  "Author": "NG64",
+  "Type": "Car",
+  "Body Style": "Plumber",
+  "Country": "Mushroom Kingdom",
+  "Description": "Play as Mario, powered by libsm64. Needs the NG64 helper running with your own Super Mario 64 (US) ROM.",
+  "default_pc": "mario",
+  "Value": 0
+}
