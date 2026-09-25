@@ -292,6 +292,66 @@ for i=0,2 do local a=vec3(be:getObjectOOBBHalfAxisXYZ(id,i)) local l=a:length() 
 return tostring(inside)""" % carId)
 check("false" in inside, "not left inside the car after being run over")
 
+# -- smooth motion: the mesh is rebuilt every rendered frame (blending the 30 Hz poses), not 30 times a second ----
+lua("ng64.scriptInput(0.6,-1,false,false,false,120)")
+time.sleep(0.5)
+b0 = status()["meshBuilds"]
+t0 = time.time()
+time.sleep(2.0)
+b1 = status()["meshBuilds"]
+rate = (b1 - b0) / (time.time() - t0)
+perf = text(tool("get_performance_metrics"))
+print("  mesh builds/s %.0f; %s" % (rate, perf[:160].replace("\n", " ")))
+check(rate > 40, "Mario's mesh updates at the render rate (%.0f builds/s, 30 Hz would be 30)" % rate)
+
+# -- a wreck in two pieces: two hulls, and the gap between them is open ------------------------------------------
+fresh_car()
+cx, cy, cz, nx, ny, half, fx, fy = car_geo()
+lua("""_ng64uatCar:queueLuaCommand([[
+local f = obj:getDirectionVector() f:normalize()
+local function side(cid) return obj:getNodePosition(cid):dot(f) end
+for b = 0, tableSizeC(v.data.beams) - 1 do
+  local bm = v.data.beams[b]
+  if bm and bm.id1 and side(bm.id1) * side(bm.id2) < 0 then obj:breakBeam(bm.cid) end
+end
+for cid = 0, obj:getNodeCount() - 1 do
+  if side(cid) < 0 then obj:applyForceVectorTime(cid, -f * (obj:getNodeMass(cid) * 30), 0.3) end
+end]])""")
+time.sleep(3)
+lua("_ng64uatCar:queueLuaCommand(\"if not ng64Hit then extensions.load('ng64Hit') end ng64Hit.sendHull()\")")
+time.sleep(1)
+pieces = int(lua("return tostring(ng64.getStatus().hullPieces[%s] or 0)" % carId).split()[-1])
+check(pieces >= 2, "torn-in-half car collides as separate pieces (%d)" % pieces)
+# walk along the car's axis until a drop reaches the ground: that's the gap the pull opened between the halves
+# the split line is the front half's reference point (obj:getPosition()); the rear half was pulled back from it
+geo = lua("""local veh=_ng64uatCar local f=veh:getDirectionVector() f.z=0 f:normalize() local o=veh:getPosition()
+return string.format('%f %f %f %f %f', o.x,o.y,o.z,f.x,f.y)""").split()
+gx, gy, gz, gfx, gfy = map(float, geo)
+landed = None
+for off in [-x * 0.25 for x in range(0, 13)]:
+    px, py = gx + gfx * off, gy + gfy * off
+    lua("ng64.teleport(%f,%f,%f)" % (px, py, gz + 2.5))
+    time.sleep(1.2)
+    z = status()["pos"][2]
+    if z < mz + 0.15:
+        landed = (off, z)
+        break
+check(landed is not None, "Mario dropped into the gap between the pieces reaches the ground (at %s)" % (landed,))
+shot("08_wreck_gap")
+
+# -- reset: Mario comes back at the anchor under him, not the original spawn point ---------------------------------
+spawn_pos = status()["pos"]
+lua("ng64.teleport(%f,%f,%f)" % (mx + 25, my - 25, mz + 0.3))
+time.sleep(3.0)                       # anchor follows him while he stands there
+lua("ng64.scriptInput(0,-1,false,false,false,20,1,0)")   # walk a bit further, then reset
+time.sleep(1.0)
+before = status()["pos"]
+lua("getPlayerVehicle(0):queueLuaCommand('obj:requestReset(RESET_PHYSICS)')")
+time.sleep(1.5)
+after = status()["pos"]
+d_anchor = ((after[0] - (mx + 25)) ** 2 + (after[1] - (my - 25)) ** 2) ** 0.5
+check(d_anchor < 4.0 and status()["health"] == 2176, "reset puts Mario at the anchor near him (%.1f m from where it followed him), full health" % d_anchor)
+
 # -- multiplayer (BeamMP) -----------------------------------------------------------------------------------------------
 # outgoing: capture what the mod would send through BeamMP's TriggerServerEvent
 lua("_ng64Sent = {} TriggerServerEvent = function(n, d) table.insert(_ng64Sent, n .. '=' .. d) end")

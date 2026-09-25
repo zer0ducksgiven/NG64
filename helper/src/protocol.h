@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define NG64_PORT          47064
-#define NG64_PROTO_VERSION 2
+#define NG64_PROTO_VERSION 4
 
 // BeamNG metres per SM64 unit (same scale sm64-san-andreas uses for GTA).
 #define NG64_SCALE 0.0085f
@@ -15,18 +15,19 @@
 #define MSG_SPAWN     'S'  // f32 x, y, z (bng)
 #define MSG_DESPAWN   'D'
 #define MSG_VEHICLES  'V'  // u16 count; {u32 id; f32 oobbCenter[3]; f32 oobbHalfAxis[3][3]; f32 origin[3]; f32 fwd[3]; f32 up[3]} (bng)
-#define MSG_HULL      'U'  // u32 id; f32 cell, x0, y0, bottom; u16 nx, ny; f32 top[nx*ny] (vehicle frame x right, y fwd, z up; NaN = empty)
+#define MSG_HULL      'U'  // u32 id; f32 cell, x0, y0, bottom; u16 nx, ny; u8 piece, pieceCount; f32 top[nx*ny] (vehicle frame x right, y fwd, z up; NaN = empty)
 #define MSG_HURT      'K'  // f32 src[3] (bng); u8 damage; u8 bigKnockback; f32 vehicleVel[3] (bng m/s)
 #define MSG_REMOTE    'R'  // u32 key; f32 pos[3] (bng); f32 faceAngle; u32 action; i16 animId; i16 animFrame; u32 flags  (key 0 = remove all)
 #define MSG_REMOTE_DEL 'X' // u32 key
 #define MSG_INPUT     'I'  // scripted input for UAT: f32 stickX, stickY; u8 a, b, z; u16 frames
 #define MSG_PING      'P'
-#define MSG_TELEPORT  'M'  // f32 x, y, z (bng)
+#define MSG_TELEPORT  'M'  // f32 x, y, z (bng); optional u8 reset (full health, freefall)
 
 // helper -> client
 #define MSG_WELCOME   'W'  // u8 ok; str message\0; str atlasPath\0 (game-virtual path)
 #define MSG_FRAME     'F'  // FrameHeader only; the mesh follows in MSG_CHUNK packets (LuaSocket caps UDP reads at 8 KB)
-#define MSG_CHUNK     'G'  // ChunkHeader then count * PackedVert
+#define MSG_CHUNK     'G'  // ChunkHeader then count * PackedVert (unique vertices)
+#define MSG_INDEX     'J'  // ChunkHeader then count * u16 (corner -> unique vertex)
 #define MSG_HIT       'A'  // u32 vehId; f32 point[3]; f32 dir[3]; f32 strength (bng)
 #define MSG_LOG       'L'  // str\0
 
@@ -45,7 +46,9 @@ typedef struct {
     uint32_t flags;
     float    camPos[3];     // bng, local only
     float    camTarget[3];  // bng, local only
-    uint16_t numVerts;
+    uint16_t numVerts;      // unique vertices (MSG_CHUNK)
+    uint16_t numIndices;    // triangle corners (MSG_INDEX), 3 per triangle
+    uint32_t indexHash;     // FNV-1a of the index list: same hash = same topology, so frames can be blended
 } FrameHeader;
 
 typedef struct {
@@ -56,7 +59,8 @@ typedef struct {
     uint16_t count;
 } ChunkHeader;
 
-#define NG64_CHUNK_VERTS 600   // 600 * 13 + 13 bytes stays under 8 KB
+#define NG64_CHUNK_VERTS 600     // 600 * 13 + 13 bytes stays under 8 KB
+#define NG64_CHUNK_INDICES 3000  // 3000 * 2 + 13 bytes
 
 typedef struct {
     int16_t  p[3];   // millimetres relative to FrameHeader.pos, bng axes

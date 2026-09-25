@@ -9,7 +9,7 @@ local logTag = "ng64"
 local ffi = require("ffi")
 
 local HELPER_HOST, HELPER_PORT = "127.0.0.1", 47064
-local PROTO_VERSION = 2
+local PROTO_VERSION = 4
 local STUB_MODEL = "ng64_mario"
 
 local GRID_N, GRID_SP = 49, 0.5         -- terrain sample grid around Mario (24 m square)
@@ -25,7 +25,7 @@ typedef struct {
   float pos[3]; float vel[3]; float faceAngle;
   int16_t health; uint32_t action; int16_t animId; int16_t animFrame; uint32_t flags;
   float camPos[3]; float camTarget[3];
-  uint16_t numVerts;
+  uint16_t numVerts; uint16_t numIndices; uint32_t indexHash;
 } ng64_FrameHeader;
 typedef struct { uint8_t type; uint32_t key; uint32_t seq; uint16_t start; uint16_t count; } ng64_ChunkHeader;
 typedef struct { int16_t p[3]; int8_t n[3]; uint16_t uv[2]; } ng64_PackedVert;
@@ -52,13 +52,16 @@ local prevCam, curCam         -- {pos, target, t}
 
 local meshes = {}             -- key -> { obj, lastFrame }
 local pendingFrames = {}      -- key -> frame being reassembled from chunks
+local goneKeys = {}           -- remote players who left: frames still in flight for them are dropped
 local remoteNames = {}
 
 local grid                    -- in-progress terrain sample job
 local gridCenter              -- vec3 of the last sent grid
 
 local mpAccum = 0
-local hitCount, hurtCount, hullCount, carDentCount = 0, 0, 0, 0   -- for UAT
+local hitCount, hurtCount, hullCount, carDentCount, meshBuilds = 0, 0, 0, 0, 0   -- for UAT
+local hullPieces = {}   -- vehicle id -> pieces in its last hull
+local profCreate, profBlend = 0, 0   -- seconds spent in createMesh / blending, for tuning
 local simTime = 0
 
 -- ------------------------------------------------------------------------------------------------------------
@@ -114,6 +117,8 @@ local chunkHdrBuf = ffi.new("ng64_ChunkHeader")
 local hitBuf = ffi.new("ng64_Hit")
 local chunkVerts = ffi.new("ng64_PackedVert[?]", 600)
 
+local chunkIdx = ffi.new("uint16_t[?]", 3000)
+
 local function fillVerts(pool, start, count)
   for i = 0, count - 1 do
     local pv = chunkVerts[i]
@@ -124,21 +129,89 @@ local function fillVerts(pool, start, count)
     nt.x, nt.y, nt.z = pv.n[0] / 127, pv.n[1] / 127, pv.n[2] / 127
     local ut = pool.uvs[j]; if not ut then ut = {}; pool.uvs[j] = ut end
     ut.u, ut.v = pv.uv[0] / 65535, pv.uv[1] / 65535
-    if not pool.faces[j] then pool.faces[j] = { v = j - 1, n = j - 1, u = j - 1 } end
   end
 end
 
-local function newPool() return { verts = {}, normals = {}, uvs = {}, faces = {} } end
+local function fillIndices(pool, start, count)
+  local idx = pool.idx
+  for i = 0, count - 1 do idx[start + i + 1] = chunkIdx[i] end
+end
+
+local function newPool() return { verts = {}, normals = {}, uvs = {}, idx = {}, faces = {} } end
+
+local function trim(t, n, upto)
+  for j = n + 1, upto do t[j] = nil end
+end
 
 local NUM_MESH_BUFFERS = 3
+local MAX_BUILDS_PER_SECOND = 60   -- createMesh is BeamNG's cost; blending faster than this isn't visible anyway
+
+-- A finished 30 Hz pose becomes "current", the old current becomes "previous", and the next one is filled into
+-- whichever pool is neither. Rendering blends previous -> current, so Mario moves smoothly at the game's frame rate
+-- (one sm64 frame behind, like the camera) instead of stepping at 30 Hz.
+local function completeFrame(pf)
+  local filled = pf.pools[pf.fill]
+  local nv, ni = pf.nv, pf.ni
+  trim(filled.verts, nv, filled.nv or 0)
+  trim(filled.normals, nv, filled.nv or 0)
+  trim(filled.uvs, nv, filled.nv or 0)
+  -- the face list only changes when the topology does (hash), so rebuild it only then
+  if filled.facesHash ~= pf.ihash or filled.ni ~= ni then
+    local faces, idx = filled.faces, filled.idx
+    for j = 1, ni do
+      local k = idx[j]
+      local f = faces[j]
+      if f then f.v, f.n, f.u = k, k, k else faces[j] = { v = k, n = k, u = k } end
+    end
+    trim(faces, ni, filled.ni or 0)
+    filled.facesHash = pf.ihash
+  end
+  filled.nv, filled.ni = nv, ni
+  pf.prev = pf.cur
+  pf.cur = { pool = filled, nv = nv, ihash = pf.ihash, pos = pf.pos, vel = pf.vel, t = simTime }
+  for i = 1, 3 do
+    local p = pf.pools[i]
+    if p ~= filled and (not pf.prev or p ~= pf.prev.pool) then pf.fill = i break end
+  end
+  pf.dirty = true
+end
+
+-- the pose to draw this rendered frame
+local function blendedFrame(pf)
+  local cur, prev = pf.cur, pf.prev
+  if not cur then return nil end
+  local a = 1
+  if prev and prev.ihash == cur.ihash and prev.nv == cur.nv and cur.t > prev.t then
+    a = math.min(1, math.max(0, (simTime - cur.t) / math.max(1 / 60, cur.t - prev.t)))
+  end
+  if not pf.dirty then
+    if a >= 1 and pf.lastAlpha == 1 then return nil end                         -- nothing changed since last build
+    if simTime - (pf.lastBuild or -1) < 1 / MAX_BUILDS_PER_SECOND then return nil end
+  end
+  pf.dirty, pf.lastAlpha, pf.lastBuild = false, a, simTime
+  if a >= 1 or not prev then
+    return { verts = cur.pool.verts, normals = cur.pool.normals, uvs = cur.pool.uvs, faces = cur.pool.faces, nv = cur.nv, pos = cur.pos, vel = cur.vel }
+  end
+  local out, pp, cp, b = pf.out, prev.pool, cur.pool, 1 - a
+  for j = 1, cur.nv do
+    local vo = out.verts[j]; if not vo then vo = {}; out.verts[j] = vo end
+    local v0, v1 = pp.verts[j], cp.verts[j]
+    vo.x, vo.y, vo.z = v0.x * b + v1.x * a, v0.y * b + v1.y * a, v0.z * b + v1.z * a
+    local no = out.normals[j]; if not no then no = {}; out.normals[j] = no end
+    local n0, n1 = pp.normals[j], cp.normals[j]
+    no.x, no.y, no.z = n0.x * b + n1.x * a, n0.y * b + n1.y * a, n0.z * b + n1.z * a
+  end
+  trim(out.verts, cur.nv, out.nv or 0)
+  trim(out.normals, cur.nv, out.nv or 0)
+  out.nv = cur.nv
+  return { verts = out.verts, normals = out.normals, uvs = cp.uvs, faces = cp.faces, nv = cur.nv, pos = prev.pos * b + cur.pos * a, vel = cur.vel }
+end
 
 -- Only ever called once per onUpdate, with the newest complete frame. createMesh leaves an object blank until the
 -- next rendered frame, so each pose goes into a mesh that isn't on screen, is shown, and the previous one is only
--- hidden a few frames later. Three meshes means the one being rebuilt is never the one still waiting to be hidden.
+-- hidden on the next update, once the new one has been drawn. Three meshes means the one being rebuilt is never the one still waiting to be hidden.
 local function buildMesh(key, r)
-  local pool, nv = r.pool, r.nv
-  for j = nv + 1, pool.lastNv or 0 do pool.verts[j], pool.normals[j], pool.uvs[j], pool.faces[j] = nil, nil, nil, nil end
-  pool.lastNv = nv
+  local nv = r.nv
   local entry = meshes[key]
   if not entry then
     entry = { objs = {}, front = 1, hiding = {} }
@@ -161,10 +234,13 @@ local function buildMesh(key, r)
     end
     if not back then return end
     local obj = entry.objs[back]
-    obj:createMesh({ { { verts = pool.verts, normals = pool.normals, uvs = pool.uvs, faces = pool.faces, material = materialName } } })
+    meshBuilds = meshBuilds + 1
+    local t0 = os.clock()
+    obj:createMesh({ { { verts = r.verts, normals = r.normals, uvs = r.uvs, faces = r.faces, material = materialName } } })
+    profCreate = profCreate + (os.clock() - t0)
     obj:setPosition(r.pos)
     obj:setHidden(false)
-    if entry.obj then entry.hiding[entry.front] = 3 end
+    if entry.obj then entry.hiding[entry.front] = 2 end
     entry.front = back
     entry.obj = obj
   end
@@ -177,6 +253,7 @@ local function deleteMesh(key)
   local e = meshes[key]
   if e then for _, o in ipairs(e.objs) do o:delete() end end
   meshes[key] = nil
+  pendingFrames[key] = nil   -- or the next update would rebuild it from the last pose
 end
 
 -- ------------------------------------------------------------------------------------------------------------
@@ -233,6 +310,8 @@ end
 
 local HULL_REFRESH = 2.0            -- seconds between re-reading a vehicle's node shape
 local hullAge = {}                  -- vehicle id -> seconds since its hull was last requested
+local hullDamage = {}               -- vehicle id -> its damage when the hull was last requested
+local HULL_REFRESH_WRECKING = 0.3
 
 local function requestHull(veh)
   veh:queueLuaCommand("if not ng64Hit then extensions.load('ng64Hit') end ng64Hit.sendHull()")
@@ -254,9 +333,15 @@ local function sendVehicles(marioPos, dt)
         parts[#parts + 1] = packU32(id) .. packF(cx, cy, cz, a0x, a0y, a0z, a1x, a1y, a1z, a2x, a2y, a2z,
           o.x, o.y, o.z, f.x, f.y, f.z, u.x, u.y, u.z)
         count = count + 1
+        -- a car that's still being wrecked changes shape (and falls apart) fast: re-read it far more often then
+        local dmg = map.objects[id] and map.objects[id].damage or 0
+        local changing = dmg - (hullDamage[id] or dmg) > 50
         local age = (hullAge[id] or HULL_REFRESH) + (dt or 0)
         hullAge[id] = age
-        if age >= HULL_REFRESH then requestHull(veh) end
+        if age >= (changing and HULL_REFRESH_WRECKING or HULL_REFRESH) then
+          hullDamage[id] = dmg
+          requestHull(veh)
+        end
       end
     end
   end
@@ -355,6 +440,26 @@ end
 -- ------------------------------------------------------------------------------------------------------------
 -- local Mario lifecycle
 
+-- The anchor is invisible and pinned, so on its own it would stay where Mario was spawned and a reset would put
+-- him back there. Keep it under him (only while he's on the ground, so a reset never drops him mid-air).
+local STUB_FOLLOW_INTERVAL = 1.0
+local stubMovedAt, stubFollowAt, pendingReset, ownMovePending = -10, 0, nil, false
+local function followStub(stub, pos)
+  if pendingReset and simTime >= pendingReset then
+    pendingReset = nil
+    local p = stub:getPosition()
+    M.teleport(p.x, p.y, p.z + 0.3, true)   -- defined further down
+    log("I", logTag, string.format("anchor reset: mario to %.2f %.2f %.2f", p.x, p.y, p.z))
+    return
+  end
+  if simTime < stubFollowAt or not lastLocalFrame then return end
+  stubFollowAt = simTime + STUB_FOLLOW_INTERVAL
+  local airborne = bit.band(lastLocalFrame.action or 0, 0x800) ~= 0
+  if airborne or (stub:getPosition() - pos):length() < 1.0 then return end
+  stubMovedAt, ownMovePending = simTime, true
+  stub:setPosRot(pos.x, pos.y, pos.z + 0.05, 0, 0, 0, 1)
+end
+
 local function activate(veh)
   openSocket()
   if not connected then sendHello() end
@@ -394,6 +499,7 @@ local function onRemote(data)
   for num in string.gmatch(rest, "[^,]+") do v[#v + 1] = tonumber(num) end
   if #v < 8 then return end
   local key = tonumber(pid) + 1
+  goneKeys[key] = nil
   sendRaw("R" .. packU32(key) .. packF(v[1], v[2], v[3], v[4]) .. packU32(v[5]) .. packI16(v[6]) .. packI16(v[7]) .. packU32(v[8]))
   remoteNames[key] = simTime
 end
@@ -401,6 +507,7 @@ end
 local function onRemoteGone(data)
   local key = (tonumber(data) or -1) + 1
   if key <= 0 then return end
+  goneKeys[key] = true
   sendRaw("X" .. packU32(key))
   deleteMesh(key)
   remoteNames[key] = nil
@@ -431,13 +538,14 @@ local function handlePacket(data)
     ffi.copy(hdrBuf, data, ffi.sizeof(hdrBuf))
     local h = hdrBuf
     local key = tonumber(h.key)
-    if key == 0 and not active then return end
+    if (key == 0 and not active) or goneKeys[key] then return end
     local nv = math.min(tonumber(h.numVerts), 3072)
+    local ni = math.min(tonumber(h.numIndices), 3072)
     local pos, vel = vec3(h.pos[0], h.pos[1], h.pos[2]), vec3(h.vel[0], h.vel[1], h.vel[2])
     local pf = pendingFrames[key]
-    if not pf then pf = { pools = { newPool(), newPool() }, fill = 1 }; pendingFrames[key] = pf end
-    pf.seq, pf.nv, pf.got, pf.pos, pf.vel = tonumber(h.seq), nv, 0, pos, vel
-    if nv == 0 then pf.ready = { pool = pf.pools[pf.fill], nv = 0, pos = pos, vel = vel } end
+    if not pf then pf = { pools = { newPool(), newPool(), newPool() }, fill = 1, out = newPool() }; pendingFrames[key] = pf end
+    pf.seq, pf.nv, pf.ni, pf.ihash, pf.got, pf.gotIdx, pf.pos, pf.vel = tonumber(h.seq), nv, ni, tonumber(h.indexHash), 0, 0, pos, vel
+    if nv == 0 then completeFrame(pf) end
     if key == 0 then
       lastLocalFrame = {
         pos = pos, vel = vel,
@@ -448,22 +556,25 @@ local function handlePacket(data)
       prevCam = curCam
       curCam = { pos = vec3(h.camPos[0], h.camPos[1], h.camPos[2]), target = vec3(h.camTarget[0], h.camTarget[1], h.camTarget[2]), t = simTime }
     end
-  elseif t == "G" then
+  elseif t == "G" or t == "J" then
     if #data < CHUNK_HEADER_SIZE then return end
     ffi.copy(chunkHdrBuf, data, CHUNK_HEADER_SIZE)
     local key = tonumber(chunkHdrBuf.key)
     local pf = pendingFrames[key]
     if not pf or pf.seq ~= tonumber(chunkHdrBuf.seq) then return end
     local start, count = tonumber(chunkHdrBuf.start), tonumber(chunkHdrBuf.count)
-    if count > 600 or start + count > pf.nv or #data < CHUNK_HEADER_SIZE + count * VERT_SIZE then return end
-    ffi.copy(chunkVerts, string.sub(data, CHUNK_HEADER_SIZE + 1), count * VERT_SIZE)
-    fillVerts(pf.pools[pf.fill], start, count)
-    pf.got = pf.got + count
-    if pf.got == pf.nv then
-      -- complete: hand this pool to onUpdate and fill the other one from now on
-      pf.ready = { pool = pf.pools[pf.fill], nv = pf.nv, pos = pf.pos, vel = pf.vel }
-      pf.fill = 3 - pf.fill
+    if t == "G" then
+      if count > 600 or start + count > pf.nv or #data < CHUNK_HEADER_SIZE + count * VERT_SIZE then return end
+      ffi.copy(chunkVerts, string.sub(data, CHUNK_HEADER_SIZE + 1), count * VERT_SIZE)
+      fillVerts(pf.pools[pf.fill], start, count)
+      pf.got = pf.got + count
+    else
+      if count > 3000 or start + count > pf.ni or #data < CHUNK_HEADER_SIZE + count * 2 then return end
+      ffi.copy(chunkIdx, string.sub(data, CHUNK_HEADER_SIZE + 1), count * 2)
+      fillIndices(pf.pools[pf.fill], start, count)
+      pf.gotIdx = pf.gotIdx + count
     end
+    if pf.got == pf.nv and pf.gotIdx == pf.ni then completeFrame(pf) end
   elseif t == "W" then
     local ok = string.byte(data, 2) == 1
     local msg, path = string.match(string.sub(data, 3), "^([^%z]*)%z([^%z]*)")
@@ -518,15 +629,14 @@ local function onUpdate(dtReal, dtSim, dtRaw)
 
   -- at most one rebuild per mesh per rendered frame, always the newest complete pose
   for key, pf in pairs(pendingFrames) do
-    if pf.ready then buildMesh(key, pf.ready) pf.ready = nil end
+    local t0 = os.clock()
+    local r = blendedFrame(pf)
+    profBlend = profBlend + (os.clock() - t0)
+    if r then buildMesh(key, r) end
   end
 
   -- smooth the meshes between 30 Hz frames
   for key, e in pairs(meshes) do
-    if e.obj and e.pos and e.frameTime then
-      local ahead = math.min(simTime - e.frameTime, 0.05)
-      e.obj:setPosition(e.pos + e.vel * ahead)
-    end
     for i, left in pairs(e.hiding) do
       if left <= 1 then e.objs[i]:setHidden(true) e.hiding[i] = nil else e.hiding[i] = left - 1 end
     end
@@ -552,18 +662,21 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     checkVehicleHurt(pos, lastLocalFrame.vel, dt)
     sendMpState(dt)
     applyCamera()
+    followStub(stub, pos)
   elseif connected then
     sendVehicles(nil)
   end
 end
 
 -- called from the vehicle VM (ng64Hit.sendHull) with its node height grid
-local function onHull(id, cell, x0, y0, bottom, nx, ny, csv)
+local function onHull(id, cell, x0, y0, bottom, nx, ny, csv, index, count)
+  index, count = index or 0, count or 1
   local vals = {}
   for tok in string.gmatch(csv, "[^,]+") do vals[#vals + 1] = (tok == "n") and (0 / 0) or tonumber(tok) end
   if #vals ~= nx * ny then return end
   hullCount = hullCount + 1
-  sendRaw("U" .. packU32(id) .. packF(cell, x0, y0, bottom) .. packU16(nx) .. packU16(ny) .. packF(unpack(vals)))
+  hullPieces[id] = count
+  sendRaw("U" .. packU32(id) .. packF(cell, x0, y0, bottom) .. packU16(nx) .. packU16(ny) .. string.char(index, count) .. packF(unpack(vals)))
 end
 
 local function onVehicleSpawned(vid)
@@ -580,6 +693,14 @@ local function onVehicleSwitched(oldId, newId)
   elseif active then
     deactivate()
   end
+end
+
+-- BeamNG's reset (R), recover and map teleports all act on the anchor vehicle; Mario goes where it went
+local function onVehicleResetted(vid)
+  if not active or vid ~= stubId then return end
+  -- moving the anchor ourselves fires this event too: swallow exactly one, and only right after our own move
+  if ownMovePending and simTime - stubMovedAt < 0.5 then ownMovePending = false return end
+  pendingReset = simTime + 0.1                       -- position settles a moment after the reset event
 end
 
 local function onVehicleDestroyed(vid)
@@ -612,11 +733,11 @@ local function scriptInput(stickX, stickY, a, b, z, frames, dirX, dirY)
   sendRaw("I" .. packF(stickX or 0, stickY or 0) .. string.char(a and 1 or 0, b and 1 or 0, z and 1 or 0) .. packU16(frames or 1) .. extra)
 end
 
-local function teleport(x, y, z)
+local function teleport(x, y, z, reset)
   -- collision around the destination first, so he doesn't arrive over nothing
   startGrid(vec3(x, y, z))
   stepGrid(GRID_N * GRID_N)
-  sendRaw("M" .. packF(x, y, z))
+  sendRaw("M" .. packF(x, y, z) .. (reset and string.char(1) or ""))
 end
 
 local function getStatus()
@@ -624,7 +745,7 @@ local function getStatus()
   return {
     connected = connected, active = active, stubId = stubId, material = materialName,
     pos = f and { f.pos.x, f.pos.y, f.pos.z }, health = f and f.health, action = f and f.action,
-    numVerts = f and f.numVerts, frameAge = f and (simTime - localFrameTime), hits = hitCount, hurts = hurtCount, hulls = hullCount, carDents = carDentCount,
+    numVerts = f and f.numVerts, frameAge = f and (simTime - localFrameTime), hits = hitCount, hurts = hurtCount, hulls = hullCount, carDents = carDentCount, meshBuilds = meshBuilds, hullPieces = hullPieces, profCreate = profCreate, profBlend = profBlend,
     meshes = (function() local n = 0 for _ in pairs(meshes) do n = n + 1 end return n end)(),
   }
 end
@@ -633,6 +754,7 @@ M.onUpdate = onUpdate
 M.onVehicleSpawned = onVehicleSpawned
 M.onVehicleSwitched = onVehicleSwitched
 M.onVehicleDestroyed = onVehicleDestroyed
+M.onVehicleResetted = onVehicleResetted
 M.onExtensionLoaded = onExtensionLoaded
 M.onExtensionUnloaded = onExtensionUnloaded
 M.onClientEndMission = onClientEndMission

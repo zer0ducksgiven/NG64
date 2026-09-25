@@ -37,6 +37,7 @@ void ng64_audio_stop(void);
 #define ACT_DIVE              0x0188088A
 #define ACT_DIVE_SLIDE        0x00880456
 #define ACT_THROWN_BACKWARD   0x010208BE
+#define ACT_FREEFALL          0x0100088C
 
 // ---------------------------------------------------------------------------------------------------------------
 // coordinates: sm64 is Y-up, BeamNG is Z-up. sm = (x, z, -y) / S
@@ -334,20 +335,27 @@ static void load_terrain(const uint8_t *p, int len)
 }
 
 #define MAX_VEH 64
+#define MAX_HULLS 6
+typedef struct {
+    uint32_t objId;
+    float *top;        // vehicle-frame height grid
+    int nx, ny;
+    float cell, x0, y0, bottom;
+} Hull;
+
 typedef struct {
     int used;
     uint32_t vehId;
-    uint32_t objId;
-    int isHull;        // objId is the node-derived hull rather than the bounding box
+    uint32_t objId;    // bounding-box surface object, until the vehicle sends its hull
+    int isHull;        // hulls[] are live and objId is gone
     float half[3];     // sm64 half extents (bounding box; attacks use it either way)
     float center[3];   // sm64
     float axes[3][3];  // sm64 unit axes (rows)
     float framePos[3]; // sm64, vehicle reference frame origin
     float frameRows[3][3];
     float orgB[3], fwdB[3], upB[3], rightB[3];   // same frame in bng, for push-out
-    float *hullTop;    // vehicle-frame height grid (NULL until the vehicle sends one)
-    int hullNx, hullNy;
-    float hullCell, hullX0, hullY0, hullBottom;
+    Hull hulls[MAX_HULLS];   // one per piece still held together (a wrecked car falls apart into several)
+    int numHulls;
     DWORD lastSeen;
     int hitCooldown;
 } Vehicle;
@@ -419,11 +427,27 @@ static void vehicle_move(Vehicle *veh)
     if (veh->isHull) {
         memcpy(t.position, veh->framePos, 12);
         axes_to_euler(veh->frameRows, t.eulerRotation);
+        for (int h = 0; h < veh->numHulls; h++) sm64_surface_object_move(veh->hulls[h].objId, &t);
     } else {
         memcpy(t.position, veh->center, 12);
         axes_to_euler(veh->axes, t.eulerRotation);
+        sm64_surface_object_move(veh->objId, &t);
     }
-    sm64_surface_object_move(veh->objId, &t);
+}
+
+static void hull_free(Hull *h)
+{
+    if (h->top) sm64_surface_object_delete(h->objId);
+    free(h->top);
+    memset(h, 0, sizeof(*h));
+}
+
+static void vehicle_release(Vehicle *veh)
+{
+    if (veh->isHull) for (int h = 0; h < MAX_HULLS; h++) hull_free(&veh->hulls[h]);
+    else if (veh->used) sm64_surface_object_delete(veh->objId);
+    veh->numHulls = 0;
+    veh->isHull = 0;
 }
 
 static Vehicle *vehicle_find(uint32_t id)
@@ -474,7 +498,7 @@ static void update_vehicles(const uint8_t *p, int len)
         if (veh && !veh->isHull)
             for (int a = 0; a < 3; a++) if (fabsf(veh->half[a] - half[a]) > 8.0f) rebuild = 1;
         if (!veh && !freeSlot) continue;
-        if (!veh) { free(freeSlot->hullTop); veh = freeSlot; memset(veh, 0, sizeof(*veh)); }
+        if (!veh) { veh = freeSlot; memset(veh, 0, sizeof(*veh)); }
         memcpy(veh->center, center, 12);
         memcpy(veh->axes, axes, sizeof(axes));
         memcpy(veh->half, half, 12);
@@ -488,7 +512,7 @@ static void update_vehicles(const uint8_t *p, int len)
         veh->rightB[2] = fwdB[0] * upB[1] - fwdB[1] * upB[0];
         if (rebuild) {
             // bounding box until the vehicle sends its hull
-            if (veh->used) sm64_surface_object_delete(veh->objId);
+            if (veh->used) vehicle_release(veh);
             struct SM64Surface surfs[12];
             int n;
             box_surfaces(half, surfs, &n);
@@ -508,9 +532,7 @@ static void update_vehicles(const uint8_t *p, int len)
     }
     for (int i = 0; i < MAX_VEH; i++) {
         if (s_veh[i].used && now - s_veh[i].lastSeen > 500) {
-            sm64_surface_object_delete(s_veh[i].objId);
-            free(s_veh[i].hullTop);
-            s_veh[i].hullTop = NULL;
+            vehicle_release(&s_veh[i]);
             s_veh[i].used = 0;
         }
     }
@@ -523,38 +545,46 @@ static void update_vehicles(const uint8_t *p, int len)
 // real edges (roof, bed rails, tailgate) are ledges Mario can grab; the old one-tile-per-cell hull was a staircase.
 static void load_hull(const uint8_t *p, int len)
 {
-    if (len < 24) return;
+    if (len < 26) return;
     uint32_t id;
     float cell, x0, y0, bottom;
     uint16_t nx, ny;
     memcpy(&id, p, 4); memcpy(&cell, p + 4, 4); memcpy(&x0, p + 8, 4); memcpy(&y0, p + 12, 4); memcpy(&bottom, p + 16, 4);
     memcpy(&nx, p + 20, 2); memcpy(&ny, p + 22, 2);
-    if (nx < 1 || ny < 1 || nx > 64 || ny > 64 || len < 24 + nx * ny * 4) return;
+    int index = p[24], count = p[25];
+    if (nx < 1 || ny < 1 || nx > 64 || ny > 64 || index >= MAX_HULLS || count > MAX_HULLS || index >= count || len < 26 + nx * ny * 4) return;
     Vehicle *veh = vehicle_find(id);
     if (!veh) return;
 
-    free(veh->hullTop);
-    veh->hullTop = malloc(sizeof(float) * nx * ny);
-    memcpy(veh->hullTop, p + 24, sizeof(float) * nx * ny);
-    veh->hullNx = nx; veh->hullNy = ny;
-    veh->hullCell = cell; veh->hullX0 = x0; veh->hullY0 = y0; veh->hullBottom = bottom;
+    if (!veh->isHull) {
+        // first hull replaces the bounding box
+        sm64_surface_object_delete(veh->objId);
+        veh->isHull = 1;
+    }
+    // pieces the vehicle no longer has (count went down, or it was reset back into one piece)
+    for (int h = count; h < MAX_HULLS; h++) hull_free(&veh->hulls[h]);
+    veh->numHulls = count;
+
+    Hull *hl = &veh->hulls[index];
+    hull_free(hl);
+    hl->top = malloc(sizeof(float) * nx * ny);
+    memcpy(hl->top, p + 26, sizeof(float) * nx * ny);
+    hl->nx = nx; hl->ny = ny;
+    hl->cell = cell; hl->x0 = x0; hl->y0 = y0; hl->bottom = bottom;
 
     int saved = s_surfCount;
-    heightfield_surfaces(veh->hullTop, nx, ny, x0 + cell * 0.5f, y0 + cell * 0.5f, cell, HULL_STEP, 1, bottom);
+    heightfield_surfaces(hl->top, nx, ny, x0 + cell * 0.5f, y0 + cell * 0.5f, cell, HULL_STEP, 1, bottom);
     int n = s_surfCount - saved;
-    if (n == 0) return;
     struct SM64SurfaceObject obj = { 0 };
     obj.surfaceCount = n;
-    obj.surfaces = malloc(sizeof(struct SM64Surface) * n);
+    obj.surfaces = malloc(sizeof(struct SM64Surface) * (n ? n : 1));
     memcpy(obj.surfaces, s_surfBuf + saved, sizeof(struct SM64Surface) * n);
     s_surfCount = saved;
     memcpy(obj.transform.position, veh->framePos, 12);
     axes_to_euler(veh->frameRows, obj.transform.eulerRotation);
-    sm64_surface_object_delete(veh->objId);
-    veh->objId = sm64_surface_object_create(&obj);
-    veh->isHull = 1;
+    hl->objId = sm64_surface_object_create(&obj);
     free(obj.surfaces);
-    logf_("vehicle %u hull: %dx%d cells, %d surfaces", id, nx, ny, n);
+    if (index == 0) logf_("vehicle %u hull: %d piece(s), piece 0 %dx%d cells, %d surfaces", id, count, nx, ny, n);
 }
 
 // SM64 walls only push Mario out sideways by his radius, so a car moving into him (or him landing badly on one)
@@ -567,56 +597,60 @@ static int vehicle_push_out(Mario *m)
     sm2bng(m->state.position, b);
     for (int v = 0; v < MAX_VEH; v++) {
         Vehicle *veh = &s_veh[v];
-        if (!veh->used || !veh->hullTop) continue;
+        if (!veh->used || !veh->isHull) continue;
         float d[3] = { b[0] - veh->orgB[0], b[1] - veh->orgB[1], b[2] - veh->orgB[2] };
         float lx = d[0] * veh->rightB[0] + d[1] * veh->rightB[1] + d[2] * veh->rightB[2];
         float ly = d[0] * veh->fwdB[0] + d[1] * veh->fwdB[1] + d[2] * veh->fwdB[2];
         float lz = d[0] * veh->upB[0] + d[1] * veh->upB[1] + d[2] * veh->upB[2];
-        float c = veh->hullCell;
-        int i = (int)floorf((lx - veh->hullX0) / c), j = (int)floorf((ly - veh->hullY0) / c);
-        int nx = veh->hullNx, ny = veh->hullNy;
-        if (i < 0 || j < 0 || i >= nx || j >= ny) continue;
-        float top = veh->hullTop[j * nx + i];
-        if (isnan(top) || lz < veh->hullBottom - 0.3f) continue;
-        // the smoothed surface between cells can sit below a cell's own (highest-node) top, so only count him as
-        // inside when he's under the lowest top around him too - standing on a slope must never trigger this
-        float tmin = top;
-        for (int dj = -1; dj <= 1; dj++)
-            for (int di = -1; di <= 1; di++) {
-                int ii = i + di, jj = j + dj;
-                if (ii < 0 || jj < 0 || ii >= nx || jj >= ny) continue;
-                float t = veh->hullTop[jj * nx + ii];
-                if (!isnan(t) && t < tmin) tmin = t;
-            }
-        if (lz > tmin - 0.1f) continue;
-
-        if (top - lz < 0.45f) {
-            lz = top + 0.02f;
-        } else {
-            // nearest way out: walk cells in each direction until one Mario fits on top of (or off the hull)
-            static const int dirs[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
-            float best = 1e9f, nlx = lx, nly = ly;
-            for (int k = 0; k < 4; k++) {
-                int ii = i, jj = j;
-                for (;;) {
-                    ii += dirs[k][0]; jj += dirs[k][1];
-                    if (ii < 0 || jj < 0 || ii >= nx || jj >= ny) break;
-                    float t = veh->hullTop[jj * nx + ii];
-                    if (isnan(t) || t < lz + 0.3f) break;
+        for (int h = 0; h < veh->numHulls; h++) {
+            const Hull *hl = &veh->hulls[h];
+            if (!hl->top) continue;
+            float c = hl->cell;
+            int i = (int)floorf((lx - hl->x0) / c), j = (int)floorf((ly - hl->y0) / c);
+            int nx = hl->nx, ny = hl->ny;
+            if (i < 0 || j < 0 || i >= nx || j >= ny) continue;
+            float top = hl->top[j * nx + i];
+            if (isnan(top) || lz < hl->bottom - 0.3f) continue;
+            // the smoothed surface between cells can sit below a cell's own (highest-node) top, so only count him as
+            // inside when he's under the lowest top around him too - standing on a slope must never trigger this
+            float tmin = top;
+            for (int dj = -1; dj <= 1; dj++)
+                for (int di = -1; di <= 1; di++) {
+                    int ii = i + di, jj = j + dj;
+                    if (ii < 0 || jj < 0 || ii >= nx || jj >= ny) continue;
+                    float t = hl->top[jj * nx + ii];
+                    if (!isnan(t) && t < tmin) tmin = t;
                 }
-                // edge of the last blocking cell, plus Mario's radius
-                float ex = dirs[k][0] > 0 ? veh->hullX0 + ii * c + MARIO_RADIUS_M : dirs[k][0] < 0 ? veh->hullX0 + (ii + 1) * c - MARIO_RADIUS_M : lx;
-                float ey = dirs[k][1] > 0 ? veh->hullY0 + jj * c + MARIO_RADIUS_M : dirs[k][1] < 0 ? veh->hullY0 + (jj + 1) * c - MARIO_RADIUS_M : ly;
-                float dist = fabsf(ex - lx) + fabsf(ey - ly);
-                if (dist < best) { best = dist; nlx = ex; nly = ey; }
+            if (lz > tmin - 0.1f) continue;
+
+            float nlz = lz, nlx = lx, nly = ly;
+            if (top - lz < 0.45f) {
+                nlz = top + 0.02f;
+            } else {
+                // nearest way out: walk cells in each direction until one Mario fits on top of (or off the hull)
+                static const int dirs[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+                float best = 1e9f;
+                for (int k = 0; k < 4; k++) {
+                    int ii = i, jj = j;
+                    for (;;) {
+                        ii += dirs[k][0]; jj += dirs[k][1];
+                        if (ii < 0 || jj < 0 || ii >= nx || jj >= ny) break;
+                        float t = hl->top[jj * nx + ii];
+                        if (isnan(t) || t < lz + 0.3f) break;
+                    }
+                    // edge of the last blocking cell, plus Mario's radius
+                    float ex = dirs[k][0] > 0 ? hl->x0 + ii * c + MARIO_RADIUS_M : dirs[k][0] < 0 ? hl->x0 + (ii + 1) * c - MARIO_RADIUS_M : lx;
+                    float ey = dirs[k][1] > 0 ? hl->y0 + jj * c + MARIO_RADIUS_M : dirs[k][1] < 0 ? hl->y0 + (jj + 1) * c - MARIO_RADIUS_M : ly;
+                    float dist = fabsf(ex - lx) + fabsf(ey - ly);
+                    if (dist < best) { best = dist; nlx = ex; nly = ey; }
+                }
             }
-            lx = nlx; ly = nly;
+            float nb[3], ns[3];
+            for (int k = 0; k < 3; k++) nb[k] = veh->orgB[k] + nlx * veh->rightB[k] + nly * veh->fwdB[k] + nlz * veh->upB[k];
+            bng2sm(nb, ns);
+            sm64_set_mario_position(m->id, ns[0], ns[1], ns[2]);
+            return 1;
         }
-        float nb[3], ns[3];
-        for (int k = 0; k < 3; k++) nb[k] = veh->orgB[k] + lx * veh->rightB[k] + ly * veh->fwdB[k] + lz * veh->upB[k];
-        bng2sm(nb, ns);
-        sm64_set_mario_position(m->id, ns[0], ns[1], ns[2]);
-        return 1;
     }
     return 0;
 }
@@ -851,20 +885,51 @@ static void send_frame(Mario *m)
         verts[i].uv[0] = (uint16_t)lroundf(fmaxf(0, fminf(1, au)) * 65535);
         verts[i].uv[1] = (uint16_t)lroundf(fmaxf(0, fminf(1, av)) * 65535);
     }
-    h.numVerts = (uint16_t)nv;
+    // Triangle corners share most of their vertices; BeamNG's createMesh cost scales with the vertex list, so send
+    // each distinct vertex once plus a corner index list (~800 vertices instead of ~2250 copies).
+    static PackedVert uniq[SM64_GEO_MAX_TRIANGLES * 3];
+    static uint16_t idx[SM64_GEO_MAX_TRIANGLES * 3];
+    static int32_t table[8192];
+    for (int i = 0; i < 8192; i++) table[i] = -1;
+    int nu = 0;
+    uint32_t ih = 2166136261u;
+    for (int i = 0; i < nv; i++) {
+        const uint8_t *bytes = (const uint8_t *)&verts[i];
+        uint32_t hsh = 2166136261u;
+        for (size_t k = 0; k < sizeof(PackedVert); k++) hsh = (hsh ^ bytes[k]) * 16777619u;
+        uint32_t slot = hsh & 8191;
+        for (;;) {
+            if (table[slot] < 0) { table[slot] = nu; uniq[nu] = verts[i]; idx[i] = (uint16_t)nu++; break; }
+            if (!memcmp(&uniq[table[slot]], &verts[i], sizeof(PackedVert))) { idx[i] = (uint16_t)table[slot]; break; }
+            slot = (slot + 1) & 8191;
+        }
+        ih = (ih ^ (idx[i] & 0xff)) * 16777619u;
+        ih = (ih ^ (idx[i] >> 8)) * 16777619u;
+    }
+    h.numVerts = (uint16_t)nu;
+    h.numIndices = (uint16_t)nv;
+    h.indexHash = ih;
     send_raw(&h, sizeof(h));
 
-    static uint8_t chunk[sizeof(ChunkHeader) + NG64_CHUNK_VERTS * sizeof(PackedVert)];
-    for (int start = 0; start < nv; start += NG64_CHUNK_VERTS) {
-        int count = nv - start < NG64_CHUNK_VERTS ? nv - start : NG64_CHUNK_VERTS;
-        ChunkHeader *c = (ChunkHeader *)chunk;
+    static uint8_t chunk[8192];   // fits either 600 vertices (7800 B) or 3000 indices (6000 B)
+    ChunkHeader *c = (ChunkHeader *)chunk;
+    c->key = m->key;
+    c->seq = h.seq;
+    for (int start = 0; start < nu; start += NG64_CHUNK_VERTS) {
+        int count = nu - start < NG64_CHUNK_VERTS ? nu - start : NG64_CHUNK_VERTS;
         c->type = MSG_CHUNK;
-        c->key = m->key;
-        c->seq = h.seq;
         c->start = (uint16_t)start;
         c->count = (uint16_t)count;
-        memcpy(chunk + sizeof(ChunkHeader), verts + start, count * sizeof(PackedVert));
+        memcpy(chunk + sizeof(ChunkHeader), uniq + start, count * sizeof(PackedVert));
         send_raw(chunk, (int)(sizeof(ChunkHeader) + count * sizeof(PackedVert)));
+    }
+    for (int start = 0; start < nv; start += NG64_CHUNK_INDICES) {
+        int count = nv - start < NG64_CHUNK_INDICES ? nv - start : NG64_CHUNK_INDICES;
+        c->type = MSG_INDEX;
+        c->start = (uint16_t)start;
+        c->count = (uint16_t)count;
+        memcpy(chunk + sizeof(ChunkHeader), idx + start, count * 2);
+        send_raw(chunk, (int)(sizeof(ChunkHeader) + count * 2));
     }
 }
 
@@ -934,7 +999,19 @@ static void handle_packet(const uint8_t *p, int len)
     case MSG_DESPAWN: { Mario *m = mario_find(0); if (m) mario_delete(m); break; }
     case MSG_TELEPORT: {
         Mario *m = mario_find(0);
-        if (m && len >= 12) { float sp[3]; bng2sm((const float *)p, sp); sm64_set_mario_position(m->id, sp[0], sp[1], sp[2]); sm64_set_mario_velocity(m->id, 0, 0, 0); }
+        if (m && len >= 12) {
+            float sp[3];
+            bng2sm((const float *)p, sp);
+            sm64_set_mario_position(m->id, sp[0], sp[1], sp[2]);
+            sm64_set_mario_velocity(m->id, 0, 0, 0);
+            sm64_set_mario_forward_velocity(m->id, 0);
+            if (len >= 13 && p[12]) {
+                // vehicle reset: back on his feet at full health, like a reset repairs a car
+                sm64_set_mario_health(m->id, 0x880);
+                sm64_set_mario_action(m->id, ACT_FREEFALL);
+                logf_("mario reset to %.2f %.2f %.2f", ((const float *)p)[0], ((const float *)p)[1], ((const float *)p)[2]);
+            }
+        }
         break;
     }
     case MSG_VEHICLES: update_vehicles(p, len); break;

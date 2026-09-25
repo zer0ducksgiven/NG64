@@ -48,7 +48,16 @@ Input is only read while the BeamNG window has focus. To stop playing as Mario, 
 
 - Spawns and renders textured Mario; frames arrive live at 30 Hz.
 - Stands on and walks over the map (terrain and static meshes), and jumps and runs with SM64 physics.
-- No flicker: Mario's mesh is triple-buffered and rebuilt at most once per rendered frame. `tests/flicker_capture.ps1` grabs the game window off the desktop
+- No flicker: Mario's mesh is triple-buffered and rebuilt at most once per rendered frame.
+- Smooth motion: SM64 runs at 30 Hz, but Mario is drawn at the game's frame rate (up to 60 rebuilds a second) by
+  blending his last two poses, one SM64 frame behind like the camera. The helper sends each distinct vertex once
+  (about 540 instead of about 2250 per-corner copies). BeamNG's createMesh cost scales with that count, so Mario
+  costs about 1 ms of Lua per frame.
+- Wrecks: a car's hull is split into the pieces still held together by unbroken beams, so a truck torn into cab,
+  chassis and bed collides as separate pieces with open space between them. A car that's still being damaged is
+  re-read every 0.3 s.
+- Resets: the invisible anchor vehicle follows Mario, so BeamNG's reset (R), recover and map teleports put him
+  back where the anchor is, at full health, instead of where he was first spawned. `tests/flicker_capture.ps1` grabs the game window off the desktop
   and finds Mario in 80/80 grabs, where the single-mesh version missed him in 22/60.
 - Attacks dent and shove cars. On a stock Gavril D-Series the damage is roughly: punch 4.9k (the door buckles),
   slide kick 10k, dive 25-47k, ground pound 150k (the roof caves in).

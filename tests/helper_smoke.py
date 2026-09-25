@@ -15,7 +15,7 @@ def check(cond, msg):
     if not cond: fails.append(msg)
 
 try:
-    s.sendto(b"H" + struct.pack("<H", 2) + user.encode(), dst)
+    s.sendto(b"H" + struct.pack("<H", 4) + user.encode(), dst)
     d, _ = s.recvfrom(65536)
     check(d[0:1] == b"W" and d[1] == 1, "welcome ok")
     atlas = d[2:].split(b"\0")[1].decode()
@@ -34,8 +34,14 @@ try:
     s.sendto(b"S" + struct.pack("<fff", 0, 0, 10.5), dst)
 
     def frames(seconds):
-        out, end = [], time.time() + seconds
-        while time.time() < end:
+        # drop whatever is already queued (frames from the previous step), then collect this many seconds' worth
+        s.setblocking(False)
+        try:
+            for _ in range(10000): s.recvfrom(65536)
+        except (BlockingIOError, socket.timeout): pass
+        s.settimeout(2.0)
+        out, want, end = [], int(seconds * 30), time.time() + seconds * 4
+        while len(out) < want and time.time() < end:
             try: d, _ = s.recvfrom(65536)
             except socket.timeout: break
             if d[0:1] == b"F":
@@ -72,14 +78,15 @@ try:
     check(4.5 < xs < 6.3 and max(x[4] for x in f) < 11, "blocked by wall at x=%.2f z=%.2f" % (xs, f[-1][4]))
 
     def drain(seconds, keep_veh=False):
-        lastz, end = None, time.time() + seconds
-        while time.time() < end:
+        # count simulated frames rather than wall-clock time, so a briefly starved helper can't end the wait early
+        lastz, want, got, end = None, int(seconds * 30), 0, time.time() + seconds * 4
+        while got < want and time.time() < end:
             if keep_veh: veh()
             s.setblocking(False)
             try:
                 while True:
                     d, _ = s.recvfrom(65536)
-                    if d[0:1] == b"F": lastz = struct.unpack_from("<BIIfff", d)[5]
+                    if d[0:1] == b"F": lastz = struct.unpack_from("<BIIfff", d)[5]; got += 1
             except (BlockingIOError, socket.timeout): pass
             s.settimeout(2.0)
             time.sleep(0.01)
@@ -142,7 +149,7 @@ try:
     # hull: pickup-ish shape in the vehicle frame (x right, y fwd, z up): bed 0.9 m at the back, cab 1.5 m in front
     nx, ny, cell = 4, 8, 0.5
     top = [(1.5 if j >= 4 else 0.9) for j in range(ny) for i in range(nx)]
-    s.sendto(b"U" + struct.pack("<I4fHH", 7, cell, -1, -2, 0, nx, ny) + struct.pack("<%df" % len(top), *top), dst)
+    s.sendto(b"U" + struct.pack("<I4fHHBB", 7, cell, -1, -2, 0, nx, ny, 0, 1) + struct.pack("<%df" % len(top), *top), dst)
     s.sendto(b"M" + struct.pack("<fff", -1.5, 5, 13), dst)
     zb = drain(2.0, True)
     s.sendto(b"M" + struct.pack("<fff", 1.5, 5, 13), dst)
@@ -152,14 +159,14 @@ try:
 
     # inside the car (cab is 1.5 m tall, Mario placed at 0.5 m): pushed out through the nearest side
     def last_frame(seconds, keep_veh=True):
-        f, end = None, time.time() + seconds
-        while time.time() < end:
+        f, want, got, end = None, max(1, int(seconds * 30)), 0, time.time() + seconds * 4
+        while got < want and time.time() < end:
             if keep_veh: veh()
             s.setblocking(False)
             try:
                 while True:
                     d, _ = s.recvfrom(65536)
-                    if d[0:1] == b"F": f = struct.unpack_from("<BIIfffffffhIhhI", d)
+                    if d[0:1] == b"F": f = struct.unpack_from("<BIIfffffffhIhhI", d); got += 1
             except (BlockingIOError, socket.timeout): pass
             s.settimeout(2.0)
             time.sleep(0.01)
@@ -178,6 +185,21 @@ try:
     f1 = last_frame(0.6)
     check(f0 is not None and f0[11] == 0x010208BE, "hit by car: thrown backward (action 0x%x)" % (f0[11] if f0 else 0))
     check(f1 is not None and f1[3] > -1.0, "thrown clear along the car's travel x=%.2f" % (f1[3] if f1 else 0))
+
+    # wrecked into two pieces (cab in front, bed box behind, 2 m of nothing between them): two hulls, and the gap
+    # between them is open ground, not an invisible floor
+    cab = [1.5] * (4 * 2)
+    bed = [0.9] * (4 * 2)
+    s.sendto(b"U" + struct.pack("<I4fHHBB", 7, 0.5, -1, 1.0, 0, 4, 2, 0, 2) + struct.pack("<8f", *cab), dst)
+    s.sendto(b"U" + struct.pack("<I4fHHBB", 7, 0.5, -1, -2.0, 0, 4, 2, 1, 2) + struct.pack("<8f", *bed), dst)
+    s.sendto(b"M" + struct.pack("<fff", 0.0, 5, 13), dst)
+    zg = drain(2.0, True)
+    s.sendto(b"M" + struct.pack("<fff", 1.5, 5, 13), dst)
+    zc = drain(2.0, True)
+    s.sendto(b"M" + struct.pack("<fff", -1.5, 5, 13), dst)
+    zb = drain(2.0, True)
+    check(zg is not None and abs(zg - 10.0) < 0.05, "wreck: gap between pieces is open ground z=%s" % zg)
+    check(zc is not None and abs(zc - 11.5) < 0.05 and zb is not None and abs(zb - 10.9) < 0.05, "wreck: both pieces still solid (cab z=%s, bed z=%s)" % (zc, zb))
 finally:
     proc.kill()
     print(proc.stdout.read().decode(errors="replace")[-1500:])
