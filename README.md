@@ -48,12 +48,18 @@ Input is only read while the BeamNG window has focus. To stop playing as Mario, 
 
 - Spawns and renders textured Mario; frames arrive live at 30 Hz.
 - Stands on and walks over the map (terrain and static meshes), and jumps and runs with SM64 physics.
-- No flicker: Mario's mesh is double-buffered. `tests/flicker_capture.ps1` grabs the game window off the desktop
+- No flicker: Mario's mesh is triple-buffered and rebuilt at most once per rendered frame. `tests/flicker_capture.ps1` grabs the game window off the desktop
   and finds Mario in 80/80 grabs, where the single-mesh version missed him in 22/60.
 - Attacks dent and shove cars. On a stock Gavril D-Series the damage is roughly: punch 4.9k (the door buckles),
   slide kick 10k, dive 25-47k, ground pound 150k (the roof caves in).
-- Cars collide as their real shape: each car sends a height grid of its own nodes (the hull), so Mario lands in
-  a pickup's bed, below the cab roof. The hull is re-read every 2 s and right after a hit, so dents change the
+- Cars collide as their real shape: each car rasterizes its own collision triangles (its skin) into a height grid
+  (the hull), so Mario lands in a pickup's bed, below the cab roof, and can't drop through a roof between nodes.
+  The hull is smooth over gentle changes, so only real edges are ledges to grab, and it's sealed down to the
+  underside. If Mario still ends up inside a car (it drove into him, a bad landing), he's pushed out through the
+  nearest side, or up onto the top if that's a short hop.
+- Getting run over: SM64's own thrown knockback (the tumble from an explosion), launched along the car's travel
+  and scaled by its speed. Only the car's own speed toward Mario counts, so running or sliding into a parked car,
+  or a car he just punched away, doesn't hurt him. The hull is re-read every 2 s and right after a hit, so dents change the
   shape. Mario rides moving cars.
 - Ledges: he lands on and jumps onto the top of height steps instead of bonking off them. If he ever ends up
   below the collision, he is put back on the surface above.

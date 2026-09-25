@@ -95,11 +95,43 @@ local function sendHull()
   local nx = math.max(1, math.ceil((maxX - minX) / cell))
   local ny = math.max(1, math.ceil((maxY - minY) / cell))
   local top = {}
+  local function raise(k, z) if not top[k] or z > top[k] then top[k] = z end end
+  -- nodes alone leave holes (a roof is a few nodes half a metre apart, and cells between them only hold seats or
+  -- floor), so the car's collision triangles - its actual skin - are rasterized into the grid too
   for _, p in ipairs(pts) do
     local i = math.min(nx - 1, math.floor((p[1] - minX) / cell))
     local j = math.min(ny - 1, math.floor((p[2] - minY) / cell))
-    local k = j * nx + i + 1
-    if not top[k] or p[3] > top[k] then top[k] = p[3] end
+    raise(j * nx + i + 1, p[3])
+  end
+  local tris = v.data.triangles
+  if tris then
+    local sub = { { 0.5, 0.5 }, { 0.2, 0.2 }, { 0.8, 0.2 }, { 0.2, 0.8 }, { 0.8, 0.8 } }
+    for t = 0, tableSizeC(tris) - 1 do
+      local tri = tris[t]
+      local a, b, c = pts[tri.id1 + 1], pts[tri.id2 + 1], pts[tri.id3 + 1]
+      if a and b and c then
+        local det = (b[2] - c[2]) * (a[1] - c[1]) + (c[1] - b[1]) * (a[2] - c[2])
+        if math.abs(det) > 1e-6 then   -- skip triangles seen edge-on from above (side panels)
+          local i0 = math.max(0, math.floor((math.min(a[1], b[1], c[1]) - minX) / cell))
+          local i1 = math.min(nx - 1, math.floor((math.max(a[1], b[1], c[1]) - minX) / cell))
+          local j0 = math.max(0, math.floor((math.min(a[2], b[2], c[2]) - minY) / cell))
+          local j1 = math.min(ny - 1, math.floor((math.max(a[2], b[2], c[2]) - minY) / cell))
+          for j = j0, j1 do
+            for i = i0, i1 do
+              for _, s in ipairs(sub) do
+                local x, y = minX + (i + s[1]) * cell, minY + (j + s[2]) * cell
+                local w1 = ((b[2] - c[2]) * (x - c[1]) + (c[1] - b[1]) * (y - c[2])) / det
+                local w2 = ((c[2] - a[2]) * (x - c[1]) + (a[1] - c[1]) * (y - c[2])) / det
+                local w3 = 1 - w1 - w2
+                if w1 >= -0.02 and w2 >= -0.02 and w3 >= -0.02 then
+                  raise(j * nx + i + 1, w1 * a[3] + w2 * b[3] + w3 * c[3])
+                end
+              end
+            end
+          end
+        end
+      end
+    end
   end
   -- fill gaps between nodes with the lowest neighbour so the shell has no holes
   local dirs = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }

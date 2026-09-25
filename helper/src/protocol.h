@@ -16,7 +16,7 @@
 #define MSG_DESPAWN   'D'
 #define MSG_VEHICLES  'V'  // u16 count; {u32 id; f32 oobbCenter[3]; f32 oobbHalfAxis[3][3]; f32 origin[3]; f32 fwd[3]; f32 up[3]} (bng)
 #define MSG_HULL      'U'  // u32 id; f32 cell, x0, y0, bottom; u16 nx, ny; f32 top[nx*ny] (vehicle frame x right, y fwd, z up; NaN = empty)
-#define MSG_HURT      'K'  // f32 src[3] (bng); u8 damage; u8 bigKnockback
+#define MSG_HURT      'K'  // f32 src[3] (bng); u8 damage; u8 bigKnockback; f32 vehicleVel[3] (bng m/s)
 #define MSG_REMOTE    'R'  // u32 key; f32 pos[3] (bng); f32 faceAngle; u32 action; i16 animId; i16 animFrame; u32 flags  (key 0 = remove all)
 #define MSG_REMOTE_DEL 'X' // u32 key
 #define MSG_INPUT     'I'  // scripted input for UAT: f32 stickX, stickY; u8 a, b, z; u16 frames

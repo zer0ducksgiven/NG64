@@ -114,33 +114,35 @@ local chunkHdrBuf = ffi.new("ng64_ChunkHeader")
 local hitBuf = ffi.new("ng64_Hit")
 local chunkVerts = ffi.new("ng64_PackedVert[?]", 600)
 
-local function fillVerts(pf, start, count)
+local function fillVerts(pool, start, count)
   for i = 0, count - 1 do
     local pv = chunkVerts[i]
     local j = start + i + 1
-    local vt = pf.verts[j]; if not vt then vt = {}; pf.verts[j] = vt end
+    local vt = pool.verts[j]; if not vt then vt = {}; pool.verts[j] = vt end
     vt.x, vt.y, vt.z = pv.p[0] * 0.001, pv.p[1] * 0.001, pv.p[2] * 0.001
-    local nt = pf.normals[j]; if not nt then nt = {}; pf.normals[j] = nt end
+    local nt = pool.normals[j]; if not nt then nt = {}; pool.normals[j] = nt end
     nt.x, nt.y, nt.z = pv.n[0] / 127, pv.n[1] / 127, pv.n[2] / 127
-    local ut = pf.uvs[j]; if not ut then ut = {}; pf.uvs[j] = ut end
+    local ut = pool.uvs[j]; if not ut then ut = {}; pool.uvs[j] = ut end
     ut.u, ut.v = pv.uv[0] / 65535, pv.uv[1] / 65535
-    if not pf.faces[j] then pf.faces[j] = { v = j - 1, n = j - 1, u = j - 1 } end
+    if not pool.faces[j] then pool.faces[j] = { v = j - 1, n = j - 1, u = j - 1 } end
   end
 end
 
-local function buildMesh(key, pf)
-  local nv = pf.nv
-  -- trim pooled tables to this frame's vertex count
-  for j = nv + 1, pf.lastNv or 0 do pf.verts[j], pf.normals[j], pf.uvs[j], pf.faces[j] = nil, nil, nil, nil end
-  pf.lastNv = nv
-  local verts, normals, uvs, faces = pf.verts, pf.normals, pf.uvs, pf.faces
-  local pos, vel = pf.pos, pf.vel
+local function newPool() return { verts = {}, normals = {}, uvs = {}, faces = {} } end
+
+local NUM_MESH_BUFFERS = 3
+
+-- Only ever called once per onUpdate, with the newest complete frame. createMesh leaves an object blank until the
+-- next rendered frame, so each pose goes into a mesh that isn't on screen, is shown, and the previous one is only
+-- hidden a few frames later. Three meshes means the one being rebuilt is never the one still waiting to be hidden.
+local function buildMesh(key, r)
+  local pool, nv = r.pool, r.nv
+  for j = nv + 1, pool.lastNv or 0 do pool.verts[j], pool.normals[j], pool.uvs[j], pool.faces[j] = nil, nil, nil, nil end
+  pool.lastNv = nv
   local entry = meshes[key]
   if not entry then
-    -- two meshes, double-buffered: createMesh leaves the object blank until the next rendered frame, so we build
-    -- into the hidden one, show it, and only hide the previous one a couple of frames later (no blank frames)
-    entry = { objs = {}, front = 1 }
-    for i = 1, 2 do
+    entry = { objs = {}, front = 1, hiding = {} }
+    for i = 1, NUM_MESH_BUFFERS do
       local obj = createObject("ProceduralMesh")
       obj:registerObject("ng64_mario_mesh_" .. tostring(key) .. "_" .. i)
       obj.canSave = false
@@ -151,18 +153,23 @@ local function buildMesh(key, pf)
     meshes[key] = entry
   end
   if nv > 0 and materialName then
-    local back = 3 - entry.front
+    -- next mesh that is neither on screen nor waiting to be hidden
+    local back
+    for k = 1, NUM_MESH_BUFFERS - 1 do
+      local i = (entry.front + k - 1) % NUM_MESH_BUFFERS + 1
+      if not entry.hiding[i] then back = i break end
+    end
+    if not back then return end
     local obj = entry.objs[back]
-    obj:createMesh({ { { verts = verts, normals = normals, uvs = uvs, faces = faces, material = materialName } } })
-    obj:setPosition(pos)
+    obj:createMesh({ { { verts = pool.verts, normals = pool.normals, uvs = pool.uvs, faces = pool.faces, material = materialName } } })
+    obj:setPosition(r.pos)
     obj:setHidden(false)
-    if entry.hideObj and entry.hideObj ~= entry.objs[entry.front] then entry.hideObj:setHidden(true) end
-    entry.hideObj, entry.hideFrames = entry.objs[entry.front], 2
+    if entry.obj then entry.hiding[entry.front] = 3 end
     entry.front = back
     entry.obj = obj
   end
-  entry.pos = pos
-  entry.vel = vel
+  entry.pos = r.pos
+  entry.vel = r.vel
   entry.frameTime = simTime
 end
 
@@ -258,6 +265,7 @@ end
 
 -- vehicles driving into Mario hurt him
 local hurtCooldown = 0
+local hitGrace = {}   -- vehicle id -> simTime Mario last hit it
 local function checkVehicleHurt(marioPos, marioVel, dt)
   hurtCooldown = math.max(0, hurtCooldown - dt)
   if hurtCooldown > 0 then return end
@@ -266,9 +274,7 @@ local function checkVehicleHurt(marioPos, marioVel, dt)
     if veh and not isStub(veh) then
       local id = veh:getID()
       local vel = veh:getVelocity()
-      local rel = vel - marioVel
-      local speed = rel:length()
-      if speed > 4 then
+      if vel:length() > 4 and simTime - (hitGrace[id] or -99) > 1.5 then
         local c = vec3(be:getObjectOOBBCenterXYZ(id))
         local d = marioPos + vec3(0, 0, 0.6) - c
         local inside = true
@@ -282,10 +288,13 @@ local function checkVehicleHurt(marioPos, marioVel, dt)
             if math.abs(ax.z) / len > 0.7 and along * (ax.z > 0 and 1 or -1) > len * 0.6 then inside = false break end
           end
         end
-        -- only when the car is moving toward Mario
-        if inside and rel:dot(d) < 0 then
+        -- the car's own speed toward Mario (d points car -> Mario). Relative speed would count Mario running or
+        -- sliding into a parked car, and a car he just shoved away, as him being hit.
+        local flat = vec3(d.x, d.y, 0)
+        local speed = flat:length() > 1e-3 and vel:dot(flat / flat:length()) or 0
+        if inside and speed > 4 then
           local dmg = math.min(4, math.max(1, math.floor(speed / 6)))
-          sendRaw("K" .. packF(c.x, c.y, c.z) .. string.char(dmg, speed > 15 and 1 or 0))
+          sendRaw("K" .. packF(c.x, c.y, c.z) .. string.char(dmg, speed > 15 and 1 or 0) .. packF(vel.x, vel.y, vel.z))
           hurtCooldown = 1.0
           hurtCount = hurtCount + 1
           log("I", logTag, string.format("vehicle %d hit mario at %.1f m/s (damage %d)", id, speed, dmg))
@@ -308,6 +317,7 @@ local function applyHit(data)
   hitCount = hitCount + 1
   log("I", logTag, string.format("mario hit vehicle %d (strength %.1f)", h.vehId, h.strength))
   hullAge[tonumber(h.vehId)] = HULL_REFRESH - 0.4   -- re-read the dented shape shortly
+  hitGrace[tonumber(h.vehId)] = simTime             -- its dented parts flying about aren't the car hitting him
 end
 
 -- ------------------------------------------------------------------------------------------------------------
@@ -418,9 +428,9 @@ local function handlePacket(data)
     local nv = math.min(tonumber(h.numVerts), 3072)
     local pos, vel = vec3(h.pos[0], h.pos[1], h.pos[2]), vec3(h.vel[0], h.vel[1], h.vel[2])
     local pf = pendingFrames[key]
-    if not pf then pf = { verts = {}, normals = {}, uvs = {}, faces = {} }; pendingFrames[key] = pf end
+    if not pf then pf = { pools = { newPool(), newPool() }, fill = 1 }; pendingFrames[key] = pf end
     pf.seq, pf.nv, pf.got, pf.pos, pf.vel = tonumber(h.seq), nv, 0, pos, vel
-    if nv == 0 then buildMesh(key, pf) end
+    if nv == 0 then pf.ready = { pool = pf.pools[pf.fill], nv = 0, pos = pos, vel = vel } end
     if key == 0 then
       lastLocalFrame = {
         pos = pos, vel = vel,
@@ -440,9 +450,13 @@ local function handlePacket(data)
     local start, count = tonumber(chunkHdrBuf.start), tonumber(chunkHdrBuf.count)
     if count > 600 or start + count > pf.nv or #data < CHUNK_HEADER_SIZE + count * VERT_SIZE then return end
     ffi.copy(chunkVerts, string.sub(data, CHUNK_HEADER_SIZE + 1), count * VERT_SIZE)
-    fillVerts(pf, start, count)
+    fillVerts(pf.pools[pf.fill], start, count)
     pf.got = pf.got + count
-    if pf.got == pf.nv then buildMesh(key, pf) end
+    if pf.got == pf.nv then
+      -- complete: hand this pool to onUpdate and fill the other one from now on
+      pf.ready = { pool = pf.pools[pf.fill], nv = pf.nv, pos = pf.pos, vel = pf.vel }
+      pf.fill = 3 - pf.fill
+    end
   elseif t == "W" then
     local ok = string.byte(data, 2) == 1
     local msg, path = string.match(string.sub(data, 3), "^([^%z]*)%z([^%z]*)")
@@ -495,15 +509,19 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     end
   end
 
+  -- at most one rebuild per mesh per rendered frame, always the newest complete pose
+  for key, pf in pairs(pendingFrames) do
+    if pf.ready then buildMesh(key, pf.ready) pf.ready = nil end
+  end
+
   -- smooth the meshes between 30 Hz frames
   for key, e in pairs(meshes) do
     if e.obj and e.pos and e.frameTime then
       local ahead = math.min(simTime - e.frameTime, 0.05)
       e.obj:setPosition(e.pos + e.vel * ahead)
     end
-    if e.hideObj then
-      e.hideFrames = e.hideFrames - 1
-      if e.hideFrames <= 0 then e.hideObj:setHidden(true) e.hideObj = nil end
+    for i, left in pairs(e.hiding) do
+      if left <= 1 then e.objs[i]:setHidden(true) e.hiding[i] = nil else e.hiding[i] = left - 1 end
     end
     if key ~= 0 and remoteNames[key] and simTime - remoteNames[key] > 3 then
       deleteMesh(key)

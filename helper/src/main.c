@@ -36,6 +36,7 @@ void ng64_audio_stop(void);
 #define ACT_SLIDE_KICK_SLIDE  0x0080045A
 #define ACT_DIVE              0x0188088A
 #define ACT_DIVE_SLIDE        0x00880456
+#define ACT_THROWN_BACKWARD   0x010208BE
 
 // ---------------------------------------------------------------------------------------------------------------
 // coordinates: sm64 is Y-up, BeamNG is Z-up. sm = (x, z, -y) / S
@@ -228,84 +229,85 @@ static void surf_push(const float *a, const float *b, const float *c, const floa
         for (int k = 0; k < 3; k++) s->vertices[i][k] = (int32_t)lroundf(vs[i][k]);
 }
 
-// Height jump (m) between neighbouring samples above which the ground is treated as a ledge (flat tiles + wall)
-// rather than a slope. Anything smaller is triangulated smoothly and Mario just walks/steps over it.
+// Height jump (m) between neighbouring terrain samples above which the ground is a ledge (flat tiles + a wall)
+// rather than a slope. Anything smaller is triangulated smoothly and Mario walks/steps over it.
 #define STEP_M 0.35f
 
-static void push_quad_up(const float *b0, const float *b1, const float *b2, const float *b3)
+// Surfaces for a grid of heights in bng-style coords (x, y horizontal, z up), sample (i, j) at (ox + i*sp, oy + j*sp).
+// Gentle 2x2 groups become smooth triangles. Where neighbours differ by more than `step`, every affected sample
+// gets a flat tile of its own height (half a sample each way) and a vertical wall sits exactly on the tile edge
+// between them, so a ledge's top reaches right up to its wall. With `outer`, the grid is a closed solid: samples
+// on the edge get tiles too and walls run from `bottom` up to them (vehicle hulls). Everything goes through
+// bng2sm, so pass world coords for terrain and vehicle-frame coords for hulls.
+static void heightfield_surfaces(const float *h, int nx, int ny, float ox, float oy, float sp, float step, int outer, float bottom)
 {
-    float s0[3], s1[3], s2[3], s3[3], up[3] = { 0, 1, 0 };
-    bng2sm(b0, s0); bng2sm(b1, s1); bng2sm(b2, s2); bng2sm(b3, s3);
-    surf_push(s0, s1, s2, up);
-    surf_push(s0, s2, s3, up);
-}
+    float up[3] = { 0, 1, 0 };
+#define H(i, j) (((i) < 0 || (j) < 0 || (i) >= nx || (j) >= ny) ? NAN : h[(j) * nx + (i)])
+#define X(i) (ox + (i) * sp)
+#define Y(j) (oy + (j) * sp)
+#define BIG(a, b) (!isnan(a) && !isnan(b) && fabsf((a) - (b)) > step)
+    uint8_t *needTile = calloc((size_t)nx * ny, 1);
 
-static void load_terrain(const uint8_t *p, int len)
-{
-    if (len < 14) return;
-    float cx, cy, sp;
-    uint16_t n;
-    memcpy(&cx, p, 4); memcpy(&cy, p + 4, 4); memcpy(&sp, p + 8, 4); memcpy(&n, p + 12, 2);
-    if (n < 2 || len < 14 + (int)n * n * 4) return;
-    const float *h = (const float *)(p + 14);
-    s_surfCount = 0;
-
-    float half = (n - 1) * sp * 0.5f;
-#define H(i, j) h[(j) * n + (i)]
-#define X(i) (cx - half + (i) * sp)
-#define Y(j) (cy - half + (j) * sp)
-#define STEP(a, b) (!isnan(a) && !isnan(b) && fabsf((a) - (b)) > STEP_M)
-
-    // 1) cells whose four edges are all gentle become two smooth triangles; the rest are "ledge" cells
-    uint8_t *needTile = calloc((size_t)n * n, 1);
-    for (int j = 0; j < n - 1; j++) {
-        for (int i = 0; i < n - 1; i++) {
+    for (int j = 0; j < ny - 1; j++) {
+        for (int i = 0; i < nx - 1; i++) {
             float a = H(i, j), b = H(i + 1, j), c = H(i + 1, j + 1), d = H(i, j + 1);
-            int ledge = STEP(a, b) || STEP(b, c) || STEP(c, d) || STEP(d, a);
-            if (!ledge) {
-                float up[3] = { 0, 1, 0 };
+            if (!(BIG(a, b) || BIG(b, c) || BIG(c, d) || BIG(d, a))) {
                 float pa[3] = { X(i), Y(j), a }, pb[3] = { X(i + 1), Y(j), b }, pc[3] = { X(i + 1), Y(j + 1), c }, pd[3] = { X(i), Y(j + 1), d };
                 float sa[3], sb[3], sc[3], sd[3];
                 bng2sm(pa, sa); bng2sm(pb, sb); bng2sm(pc, sc); bng2sm(pd, sd);
                 if (!isnan(a) && !isnan(b) && !isnan(c)) surf_push(sa, sb, sc, up);
                 if (!isnan(a) && !isnan(c) && !isnan(d)) surf_push(sa, sc, sd, up);
+                // a group with a missing corner still needs its valid corners covered
+                if (isnan(a) || isnan(b) || isnan(c) || isnan(d))
+                    needTile[j * nx + i] = needTile[j * nx + i + 1] = needTile[(j + 1) * nx + i] = needTile[(j + 1) * nx + i + 1] = 1;
             } else {
-                needTile[j * n + i] = needTile[j * n + i + 1] = needTile[(j + 1) * n + i] = needTile[(j + 1) * n + i + 1] = 1;
+                needTile[j * nx + i] = needTile[j * nx + i + 1] = needTile[(j + 1) * nx + i] = needTile[(j + 1) * nx + i + 1] = 1;
             }
         }
     }
+    static const int dirs[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+    if (outer || nx == 1 || ny == 1)
+        for (int j = 0; j < ny; j++)
+            for (int i = 0; i < nx; i++)
+                for (int d = 0; d < 4; d++)
+                    if (isnan(H(i + dirs[d][0], j + dirs[d][1]))) needTile[j * nx + i] = 1;
 
-    // 2) every corner of a ledge cell gets a flat tile of its own height (half a cell each way), so the top of a
-    //    ledge reaches right up to the wall and Mario has something to land on / grab
-    for (int j = 0; j < n; j++) {
-        for (int i = 0; i < n; i++) {
+    for (int j = 0; j < ny; j++) {
+        for (int i = 0; i < nx; i++) {
             float z = H(i, j);
-            if (!needTile[j * n + i] || isnan(z)) continue;
+            if (!needTile[j * nx + i] || isnan(z)) continue;
             float x0 = X(i) - sp * 0.5f, x1 = X(i) + sp * 0.5f, y0 = Y(j) - sp * 0.5f, y1 = Y(j) + sp * 0.5f;
             float q0[3] = { x0, y0, z }, q1[3] = { x1, y0, z }, q2[3] = { x1, y1, z }, q3[3] = { x0, y1, z };
-            push_quad_up(q0, q1, q2, q3);
+            float s0[3], s1[3], s2[3], s3[3];
+            bng2sm(q0, s0); bng2sm(q1, s1); bng2sm(q2, s2); bng2sm(q3, s3);
+            surf_push(s0, s1, s2, up);
+            surf_push(s0, s2, s3, up);
         }
     }
 
-    // 3) vertical walls on the tile boundary between neighbours with a real step, facing the low side
-    for (int j = 0; j < n; j++) {
-        for (int i = 0; i < n; i++) {
-            for (int d = 0; d < 2; d++) {
-                int i2 = i + (d == 0), j2 = j + (d == 1);
-                if (i2 >= n || j2 >= n) continue;
-                float h1 = H(i, j), h2 = H(i2, j2);
-                if (!STEP(h1, h2)) continue;
-                float lo = fminf(h1, h2), hi = fmaxf(h1, h2);
-                float mx = (X(i) + X(i2)) * 0.5f, my = (Y(j) + Y(j2)) * 0.5f;
-                float ex = (d == 0) ? 0 : sp * 0.5f, ey = (d == 0) ? sp * 0.5f : 0;
+    for (int j = 0; j < ny; j++) {
+        for (int i = 0; i < nx; i++) {
+            float h1 = H(i, j);
+            if (isnan(h1)) continue;
+            for (int d = 0; d < 4; d++) {
+                int i2 = i + dirs[d][0], j2 = j + dirs[d][1];
+                float h2 = H(i2, j2), lo;
+                if (isnan(h2)) {
+                    if (!outer) continue;
+                    lo = bottom;                       // outside of a solid: wall down to the underside
+                } else {
+                    if (!BIG(h1, h2) || h2 > h1) continue;   // each step once, from its high side
+                    lo = h2;
+                }
+                if (h1 - lo < 0.02f) continue;
+                // wall on the shared tile edge, facing the low / outside neighbour
+                float mx = X(i) + dirs[d][0] * sp * 0.5f, my = Y(j) + dirs[d][1] * sp * 0.5f;
+                float ex = dirs[d][1] ? sp * 0.5f : 0, ey = dirs[d][0] ? sp * 0.5f : 0;
                 float b0[3] = { mx - ex, my - ey, lo }, b1[3] = { mx + ex, my + ey, lo };
-                float b2[3] = { mx + ex, my + ey, hi }, b3[3] = { mx - ex, my - ey, hi };
-                float s0[3], s1[3], s2[3], s3[3];
+                float b2[3] = { mx + ex, my + ey, h1 }, b3[3] = { mx - ex, my - ey, h1 };
+                float s0[3], s1[3], s2[3], s3[3], hb[3] = { (float)dirs[d][0], (float)dirs[d][1], 0 }, hint[3];
                 bng2sm(b0, s0); bng2sm(b1, s1); bng2sm(b2, s2); bng2sm(b3, s3);
-                float dirB[3] = { (float)(i2 - i), (float)(j2 - j), 0 };
-                if (h2 > h1) { dirB[0] = -dirB[0]; dirB[1] = -dirB[1]; }
-                float hint[3];
-                bng2sm(dirB, hint);
+                bng2sm(hb, hint);
                 surf_push(s0, s1, s2, hint);
                 surf_push(s0, s2, s3, hint);
             }
@@ -315,7 +317,19 @@ static void load_terrain(const uint8_t *p, int len)
 #undef H
 #undef X
 #undef Y
-#undef STEP
+#undef BIG
+}
+
+static void load_terrain(const uint8_t *p, int len)
+{
+    if (len < 14) return;
+    float cx, cy, sp;
+    uint16_t n;
+    memcpy(&cx, p, 4); memcpy(&cy, p + 4, 4); memcpy(&sp, p + 8, 4); memcpy(&n, p + 12, 2);
+    if (n < 2 || len < 14 + (int)n * n * 4) return;
+    float half = (n - 1) * sp * 0.5f;
+    s_surfCount = 0;
+    heightfield_surfaces((const float *)(p + 14), n, n, cx - half, cy - half, sp, STEP_M, 0, 0);
     sm64_static_surfaces_load(s_surfBuf, s_surfCount);
 }
 
@@ -330,6 +344,10 @@ typedef struct {
     float axes[3][3];  // sm64 unit axes (rows)
     float framePos[3]; // sm64, vehicle reference frame origin
     float frameRows[3][3];
+    float orgB[3], fwdB[3], upB[3], rightB[3];   // same frame in bng, for push-out
+    float *hullTop;    // vehicle-frame height grid (NULL until the vehicle sends one)
+    int hullNx, hullNy;
+    float hullCell, hullX0, hullY0, hullBottom;
     DWORD lastSeen;
     int hitCooldown;
 } Vehicle;
@@ -456,12 +474,18 @@ static void update_vehicles(const uint8_t *p, int len)
         if (veh && !veh->isHull)
             for (int a = 0; a < 3; a++) if (fabsf(veh->half[a] - half[a]) > 8.0f) rebuild = 1;
         if (!veh && !freeSlot) continue;
-        if (!veh) { veh = freeSlot; memset(veh, 0, sizeof(*veh)); }
+        if (!veh) { free(freeSlot->hullTop); veh = freeSlot; memset(veh, 0, sizeof(*veh)); }
         memcpy(veh->center, center, 12);
         memcpy(veh->axes, axes, sizeof(axes));
         memcpy(veh->half, half, 12);
         bng2sm(org, veh->framePos);
         frame_rows(fwdB, upB, veh->frameRows);
+        memcpy(veh->orgB, org, 12);
+        memcpy(veh->fwdB, fwdB, 12);
+        memcpy(veh->upB, upB, 12);
+        veh->rightB[0] = fwdB[1] * upB[2] - fwdB[2] * upB[1];
+        veh->rightB[1] = fwdB[2] * upB[0] - fwdB[0] * upB[2];
+        veh->rightB[2] = fwdB[0] * upB[1] - fwdB[1] * upB[0];
         if (rebuild) {
             // bounding box until the vehicle sends its hull
             if (veh->used) sm64_surface_object_delete(veh->objId);
@@ -485,14 +509,18 @@ static void update_vehicles(const uint8_t *p, int len)
     for (int i = 0; i < MAX_VEH; i++) {
         if (s_veh[i].used && now - s_veh[i].lastSeen > 500) {
             sm64_surface_object_delete(s_veh[i].objId);
+            free(s_veh[i].hullTop);
+            s_veh[i].hullTop = NULL;
             s_veh[i].used = 0;
         }
     }
 }
 
-// Hull from the vehicle's own nodes: a grid (vehicle frame) of the highest node in each cell. Each cell is a flat
-// tile with walls down to its lower neighbour (or the underside), so roofs, beds, hoods and bumpers sit where they
-// really are instead of inside one big box.
+#define HULL_STEP 0.25f   // smaller steps across a car's top (hood -> windscreen -> roof) are smooth slopes
+
+// Hull from the vehicle's own nodes: a grid (vehicle frame) of the highest node in each cell, built as a closed
+// solid - smooth across gentle changes, flat tiles + walls at real steps, sealed walls down to the underside. Only
+// real edges (roof, bed rails, tailgate) are ledges Mario can grab; the old one-tile-per-cell hull was a staircase.
 static void load_hull(const uint8_t *p, int len)
 {
     if (len < 24) return;
@@ -502,43 +530,17 @@ static void load_hull(const uint8_t *p, int len)
     memcpy(&id, p, 4); memcpy(&cell, p + 4, 4); memcpy(&x0, p + 8, 4); memcpy(&y0, p + 12, 4); memcpy(&bottom, p + 16, 4);
     memcpy(&nx, p + 20, 2); memcpy(&ny, p + 22, 2);
     if (nx < 1 || ny < 1 || nx > 64 || ny > 64 || len < 24 + nx * ny * 4) return;
-    const float *top = (const float *)(p + 24);
     Vehicle *veh = vehicle_find(id);
     if (!veh) return;
 
-    static const int dirs[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
-    float upH[3] = { 0, 1, 0 };
+    free(veh->hullTop);
+    veh->hullTop = malloc(sizeof(float) * nx * ny);
+    memcpy(veh->hullTop, p + 24, sizeof(float) * nx * ny);
+    veh->hullNx = nx; veh->hullNy = ny;
+    veh->hullCell = cell; veh->hullX0 = x0; veh->hullY0 = y0; veh->hullBottom = bottom;
+
     int saved = s_surfCount;
-#define T(i, j) (((i) < 0 || (j) < 0 || (i) >= nx || (j) >= ny) ? NAN : top[(j) * nx + (i)])
-    for (int j = 0; j < ny; j++) {
-        for (int i = 0; i < nx; i++) {
-            float t = T(i, j);
-            if (isnan(t)) continue;
-            float xa = x0 + i * cell, xb = xa + cell, ya = y0 + j * cell, yb = ya + cell;
-            float q0[3] = { xa, ya, t }, q1[3] = { xb, ya, t }, q2[3] = { xb, yb, t }, q3[3] = { xa, yb, t };
-            float s0[3], s1[3], s2[3], s3[3];
-            bng2sm(q0, s0); bng2sm(q1, s1); bng2sm(q2, s2); bng2sm(q3, s3);
-            surf_push(s0, s1, s2, upH);
-            surf_push(s0, s2, s3, upH);
-            for (int d = 0; d < 4; d++) {
-                float tn = T(i + dirs[d][0], j + dirs[d][1]);
-                float lo = isnan(tn) ? bottom : fmaxf(tn, bottom);
-                if (t - lo < 0.02f) continue;
-                float e0x, e0y, e1x, e1y;
-                if (dirs[d][0] == 1)       { e0x = xb; e0y = ya; e1x = xb; e1y = yb; }
-                else if (dirs[d][0] == -1) { e0x = xa; e0y = ya; e1x = xa; e1y = yb; }
-                else if (dirs[d][1] == 1)  { e0x = xa; e0y = yb; e1x = xb; e1y = yb; }
-                else                       { e0x = xa; e0y = ya; e1x = xb; e1y = ya; }
-                float w0[3] = { e0x, e0y, lo }, w1[3] = { e1x, e1y, lo }, w2[3] = { e1x, e1y, t }, w3[3] = { e0x, e0y, t };
-                float hb[3] = { (float)dirs[d][0], (float)dirs[d][1], 0 }, hs[3];
-                bng2sm(hb, hs);
-                bng2sm(w0, s0); bng2sm(w1, s1); bng2sm(w2, s2); bng2sm(w3, s3);
-                surf_push(s0, s1, s2, hs);
-                surf_push(s0, s2, s3, hs);
-            }
-        }
-    }
-#undef T
+    heightfield_surfaces(veh->hullTop, nx, ny, x0 + cell * 0.5f, y0 + cell * 0.5f, cell, HULL_STEP, 1, bottom);
     int n = s_surfCount - saved;
     if (n == 0) return;
     struct SM64SurfaceObject obj = { 0 };
@@ -553,6 +555,70 @@ static void load_hull(const uint8_t *p, int len)
     veh->isHull = 1;
     free(obj.surfaces);
     logf_("vehicle %u hull: %dx%d cells, %d surfaces", id, nx, ny, n);
+}
+
+// SM64 walls only push Mario out sideways by his radius, so a car moving into him (or him landing badly on one)
+// can leave him inside the body. Each tick: if he's under the hull's top somewhere inside it, pop him onto the top
+// when that's a short hop, otherwise out through the nearest side.
+#define MARIO_RADIUS_M 0.35f
+static int vehicle_push_out(Mario *m)
+{
+    float b[3];
+    sm2bng(m->state.position, b);
+    for (int v = 0; v < MAX_VEH; v++) {
+        Vehicle *veh = &s_veh[v];
+        if (!veh->used || !veh->hullTop) continue;
+        float d[3] = { b[0] - veh->orgB[0], b[1] - veh->orgB[1], b[2] - veh->orgB[2] };
+        float lx = d[0] * veh->rightB[0] + d[1] * veh->rightB[1] + d[2] * veh->rightB[2];
+        float ly = d[0] * veh->fwdB[0] + d[1] * veh->fwdB[1] + d[2] * veh->fwdB[2];
+        float lz = d[0] * veh->upB[0] + d[1] * veh->upB[1] + d[2] * veh->upB[2];
+        float c = veh->hullCell;
+        int i = (int)floorf((lx - veh->hullX0) / c), j = (int)floorf((ly - veh->hullY0) / c);
+        int nx = veh->hullNx, ny = veh->hullNy;
+        if (i < 0 || j < 0 || i >= nx || j >= ny) continue;
+        float top = veh->hullTop[j * nx + i];
+        if (isnan(top) || lz < veh->hullBottom - 0.3f) continue;
+        // the smoothed surface between cells can sit below a cell's own (highest-node) top, so only count him as
+        // inside when he's under the lowest top around him too - standing on a slope must never trigger this
+        float tmin = top;
+        for (int dj = -1; dj <= 1; dj++)
+            for (int di = -1; di <= 1; di++) {
+                int ii = i + di, jj = j + dj;
+                if (ii < 0 || jj < 0 || ii >= nx || jj >= ny) continue;
+                float t = veh->hullTop[jj * nx + ii];
+                if (!isnan(t) && t < tmin) tmin = t;
+            }
+        if (lz > tmin - 0.1f) continue;
+
+        if (top - lz < 0.45f) {
+            lz = top + 0.02f;
+        } else {
+            // nearest way out: walk cells in each direction until one Mario fits on top of (or off the hull)
+            static const int dirs[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+            float best = 1e9f, nlx = lx, nly = ly;
+            for (int k = 0; k < 4; k++) {
+                int ii = i, jj = j;
+                for (;;) {
+                    ii += dirs[k][0]; jj += dirs[k][1];
+                    if (ii < 0 || jj < 0 || ii >= nx || jj >= ny) break;
+                    float t = veh->hullTop[jj * nx + ii];
+                    if (isnan(t) || t < lz + 0.3f) break;
+                }
+                // edge of the last blocking cell, plus Mario's radius
+                float ex = dirs[k][0] > 0 ? veh->hullX0 + ii * c + MARIO_RADIUS_M : dirs[k][0] < 0 ? veh->hullX0 + (ii + 1) * c - MARIO_RADIUS_M : lx;
+                float ey = dirs[k][1] > 0 ? veh->hullY0 + jj * c + MARIO_RADIUS_M : dirs[k][1] < 0 ? veh->hullY0 + (jj + 1) * c - MARIO_RADIUS_M : ly;
+                float dist = fabsf(ex - lx) + fabsf(ey - ly);
+                if (dist < best) { best = dist; nlx = ex; nly = ey; }
+            }
+            lx = nlx; ly = nly;
+        }
+        float nb[3], ns[3];
+        for (int k = 0; k < 3; k++) nb[k] = veh->orgB[k] + lx * veh->rightB[k] + ly * veh->fwdB[k] + lz * veh->upB[k];
+        bng2sm(nb, ns);
+        sm64_set_mario_position(m->id, ns[0], ns[1], ns[2]);
+        return 1;
+    }
+    return 0;
 }
 
 // point inside vehicle box (sm64 space), with margin; returns closest point on box too
@@ -879,6 +945,24 @@ static void handle_packet(const uint8_t *p, int len)
             float sp[3];
             bng2sm((const float *)p, sp);
             sm64_mario_take_damage(m->id, p[12], p[13] ? 0x00000008 /* INT_SUBTYPE_BIG_KNOCKBACK */ : 0, sp[0], sp[1], sp[2]);
+            if (len >= 26) {
+                // thrown clear of the car (SM64's own tumble-through-the-air knockback, as from an explosion):
+                // face the car and fly backwards along its direction of travel, faster the faster it was going
+                float vb[3], vs[3];
+                memcpy(vb, p + 14, 12);
+                bng2sm(vb, vs);                                  // sm64 units per second
+                for (int k = 0; k < 3; k++) vs[k] /= 30.0f;      // per frame
+                float hs = sqrtf(vs[0] * vs[0] + vs[2] * vs[2]);
+                const float *mp = m->state.position;
+                float ax = hs > 1 ? -vs[0] : sp[0] - mp[0], az = hs > 1 ? -vs[2] : sp[2] - mp[2];   // toward the car
+                float face = atan2f(ax, az);
+                float speed = fminf(70.0f, fmaxf(24.0f, hs * 1.1f));
+                sm64_set_mario_action(m->id, ACT_THROWN_BACKWARD);
+                sm64_set_mario_faceangle(m->id, face);
+                sm64_set_mario_forward_velocity(m->id, -speed);
+                sm64_set_mario_velocity(m->id, -sinf(face) * speed, fminf(55.0f, fmaxf(28.0f, speed * 0.6f)), -cosf(face) * speed);
+                logf_("thrown by vehicle at %.0f units/frame", speed);
+            }
         }
         break;
     }
@@ -1071,6 +1155,10 @@ int main(int argc, char **argv)
                 in.camLookZ = -1;
             }
             sm64_mario_tick(m->id, &in, &m->state, &m->geo);
+            if (m->key == 0 && vehicle_push_out(m)) {
+                static DWORD lastPushLog;
+                if (GetTickCount() - lastPushLog > 1000) { lastPushLog = GetTickCount(); logf_("pushed mario out of a vehicle"); }
+            }
             if (m->key == 0) {
                 // fell through a gap in the sampled collision (e.g. outran the terrain refresh): with nothing at all
                 // below him he would fall forever, so put him back on the nearest surface above

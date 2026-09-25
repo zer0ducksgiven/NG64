@@ -139,16 +139,17 @@ check(abs(z0 - ground) < 0.15, "Mario standing on the map (mario z %.2f, ground 
 check(st.get("health") == 2176, "full health (%s)" % st.get("health"))
 shot("01_spawned")
 
-# flicker: grab the game window straight off the desktop; Mario must be on screen in every grab
+# flicker: grab the game window straight off the desktop while he runs in circles; Mario must be in every grab
+lua("ng64.scriptInput(0.6,-1,false,false,false,300)")
 import subprocess
 ps = "/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 here = os.path.dirname(os.path.abspath(__file__)).replace("/f/", "F:/")
 os.makedirs(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tmp"), exist_ok=True)
 env = dict(os.environ, TEMP=here + "/.tmp", TMP=here + "/.tmp", SystemRoot="C:\Windows")   # msys python passes neither
-cap = subprocess.run([ps, "-ExecutionPolicy", "Bypass", "-File", here + "/flicker_capture.ps1", "-Frames", "80"],
+cap = subprocess.run([ps, "-ExecutionPolicy", "Bypass", "-File", here + "/flicker_capture.ps1", "-Frames", "150"],
                      capture_output=True, text=True, env=env).stdout
 counts = [int(c) for c in cap.split("COUNTS")[-1].strip().split(",")] if "COUNTS" in cap else []
-check(len(counts) == 80 and min(counts) > 20, "no flicker: Mario visible in %d/%d desktop grabs (min red %s)" % (sum(1 for c in counts if c > 20), len(counts), min(counts) if counts else None))
+check(len(counts) == 150 and min(counts) > 20, "no flicker: Mario visible in %d/%d desktop grabs (min red %s)" % (sum(1 for c in counts if c > 20), len(counts), min(counts) if counts else None))
 
 # -- jump / run -------------------------------------------------------------------------------------------------------
 lua("ng64.scriptInput(0,0,true,false,false,6)")
@@ -265,10 +266,27 @@ cx, cy, cz, nx, ny, half, fx, fy = car_geo()
 lua("ng64.teleport(%f,%f,%f)" % (cx + 7, cy, mz + 0.2))
 time.sleep(1.5)
 h0 = status()["health"]
+check(h0 == 2176, "Mario's own attacks shoving cars away never hurt him (health %s)" % h0)
 lua("be:getObjectByID(%s):queueLuaCommand(\"if not ng64Hit then extensions.load('ng64Hit') end ng64Hit.hit(%f,%f,%f,1,0,0,9)\")" % (carId, cx - 200, cy, cz))
-hurt = wait_for(lambda: status()["health"] < h0, 4, 0.1)
+acts = set()
+def hurt_seen():
+    st = status()
+    acts.add(st.get("action"))
+    return st["health"] < h0
+hurt = wait_for(hurt_seen, 4, 0.03)
+for _ in range(15):
+    acts.add(status().get("action")); time.sleep(0.03)
 shot("06_run_over")
 check(bool(hurt), "vehicle hitting Mario hurts him (health %s -> %s)" % (h0, status()["health"]))
+check(0x010208BE in acts, "run over: thrown clear (SM64 thrown-backward knockback)")
+time.sleep(2.5)
+# afterwards he must not be inside the car: under its roof line within its footprint
+inside = lua("""local id=%s local p=vec3(ng64.getStatus().pos[1], ng64.getStatus().pos[2], ng64.getStatus().pos[3])
+local c=vec3(be:getObjectOOBBCenterXYZ(id)) local d=p-c local inside=true local upLen
+for i=0,2 do local a=vec3(be:getObjectOOBBHalfAxisXYZ(id,i)) local l=a:length() local t=d:dot(a)/l
+  if math.abs(a.z)/l>0.7 then if t>l*0.3 then inside=false end elseif math.abs(t)>l-0.2 then inside=false end end
+return tostring(inside)""" % carId)
+check("false" in inside, "not left inside the car after being run over")
 
 # -- multiplayer (BeamMP) -----------------------------------------------------------------------------------------------
 # outgoing: capture what the mod would send through BeamMP's TriggerServerEvent

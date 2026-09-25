@@ -149,6 +149,35 @@ try:
     zc = drain(2.0, True)
     check(zb is not None and abs(zb - 10.9) < 0.05, "hull: lands in the bed z=%s" % zb)
     check(zc is not None and abs(zc - 11.5) < 0.05, "hull: lands on the cab roof z=%s" % zc)
+
+    # inside the car (cab is 1.5 m tall, Mario placed at 0.5 m): pushed out through the nearest side
+    def last_frame(seconds, keep_veh=True):
+        f, end = None, time.time() + seconds
+        while time.time() < end:
+            if keep_veh: veh()
+            s.setblocking(False)
+            try:
+                while True:
+                    d, _ = s.recvfrom(65536)
+                    if d[0:1] == b"F": f = struct.unpack_from("<BIIfffffffhIhhI", d)
+            except (BlockingIOError, socket.timeout): pass
+            s.settimeout(2.0)
+            time.sleep(0.01)
+        return f
+    s.sendto(b"M" + struct.pack("<fff", 1.0, 5.2, 10.5), dst)
+    f = last_frame(1.0)
+    x, y, z = f[3], f[4], f[5]
+    outside = abs(y - 5) > 1.0 + 0.3 or abs(x) > 2.0 + 0.3
+    check(outside and z < 10.2, "pushed out of the car body to (%.2f, %.2f, %.2f)" % (x, y, z))
+
+    # run over at 12 m/s along +x: thrown (SM64 ACT_THROWN_BACKWARD) and carried away in +x, not left inside
+    s.sendto(b"M" + struct.pack("<fff", -3, -5, 10.2), dst)
+    last_frame(1.0)
+    s.sendto(b"K" + struct.pack("<fffBB", -4.5, -5, 10.7, 2, 0) + struct.pack("<fff", 12, 0, 0), dst)
+    f0 = last_frame(0.15)
+    f1 = last_frame(0.6)
+    check(f0 is not None and f0[11] == 0x010208BE, "hit by car: thrown backward (action 0x%x)" % (f0[11] if f0 else 0))
+    check(f1 is not None and f1[3] > -1.0, "thrown clear along the car's travel x=%.2f" % (f1[3] if f1 else 0))
 finally:
     proc.kill()
     print(proc.stdout.read().decode(errors="replace")[-1500:])
