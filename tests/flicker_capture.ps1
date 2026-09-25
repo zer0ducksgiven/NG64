@@ -1,0 +1,43 @@
+# Grabs the BeamNG window straight off the desktop as fast as possible and counts Mario-red pixels around the
+# middle of the screen in each grab - a blank frame shows up as a grab with (almost) no red. In-game screenshots
+# re-render a fresh frame, so they can't see flicker; this sees what the player sees.
+param([int]$Frames = 60, [string]$OutDir = "")
+Add-Type -AssemblyName System.Drawing
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public static class W {
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+  public struct RECT { public int L, T, R, B; }
+}
+"@
+$p = Get-Process BeamNG.drive.x64 -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+if (-not $p) { Write-Output "NO_WINDOW"; exit 1 }
+[W]::ShowWindow($p.MainWindowHandle, 9) | Out-Null
+[W]::SetForegroundWindow($p.MainWindowHandle) | Out-Null
+Start-Sleep -Milliseconds 700
+$r = New-Object W+RECT
+[W]::GetWindowRect($p.MainWindowHandle, [ref]$r) | Out-Null
+$w = $r.R - $r.L; $h = $r.B - $r.T
+# region: middle third horizontally, rows 35%..85% (Mario sits a little below centre)
+$rx = $r.L + [int]($w / 3); $ry = $r.T + [int]($h * 0.35); $rw = [int]($w / 3); $rh = [int]($h * 0.5)
+$bmp = New-Object System.Drawing.Bitmap $rw, $rh
+$g = [System.Drawing.Graphics]::FromImage($bmp)
+$counts = @()
+$sw = [Diagnostics.Stopwatch]::StartNew()
+for ($f = 0; $f -lt $Frames; $f++) {
+  $g.CopyFromScreen($rx, $ry, 0, 0, $bmp.Size)
+  $red = 0
+  for ($y = 0; $y -lt $rh; $y += 4) {
+    for ($x = 0; $x -lt $rw; $x += 4) {
+      $c = $bmp.GetPixel($x, $y)
+      if ($c.R -gt 150 -and $c.G -lt 70 -and $c.B -lt 70) { $red++ }
+    }
+  }
+  $counts += $red
+  if ($OutDir -and $f -lt 3) { $bmp.Save((Join-Path $OutDir "cap_$f.png")) }
+}
+$ms = $sw.ElapsedMilliseconds
+Write-Output ("MS_PER_GRAB " + [int]($ms / $Frames))
+Write-Output ("COUNTS " + ($counts -join ","))

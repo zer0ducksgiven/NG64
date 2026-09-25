@@ -48,18 +48,28 @@ Input is only read while the BeamNG window has focus. To stop playing as Mario, 
 
 - Spawns and renders textured Mario; frames arrive live at 30 Hz.
 - Stands on and walks over the map (terrain and static meshes), and jumps and runs with SM64 physics.
-- Punches and kicks dent and shove cars. A ground pound on a roof crushes it.
-- Stands on car roofs and rides moving cars (vehicles are moving collision boxes).
+- No flicker: Mario's mesh is double-buffered. `tests/flicker_capture.ps1` grabs the game window off the desktop
+  and finds Mario in 80/80 grabs, where the single-mesh version missed him in 22/60.
+- Attacks dent and shove cars. On a stock Gavril D-Series the damage is roughly: punch 4.9k (the door buckles),
+  slide kick 10k, dive 25-47k, ground pound 150k (the roof caves in).
+- Cars collide as their real shape: each car sends a height grid of its own nodes (the hull), so Mario lands in
+  a pickup's bed, below the cab roof. The hull is re-read every 2 s and right after a hit, so dents change the
+  shape. Mario rides moving cars.
+- Ledges: he lands on and jumps onto the top of height steps instead of bonking off them. If he ever ends up
+  below the collision, he is put back on the surface above.
 - Cars that hit him at speed knock him back and take health.
 - SM64-style orbit camera with collision pull-in. Switching vehicles gives the normal camera back.
 - BeamMP: his state goes to the server at 15 Hz, and other players' Marios are drawn and removed when they leave.
 
 ## Known limitations
 
-- **Map collision is a raycast heightfield** (24 m square, 0.5 m grid) around Mario. Height steps over 0.7 m
-  become walls. Overhangs are handled with a heuristic, so the interiors of complex buildings and multi-level
-  structures are approximate. There is no water.
-- **Vehicles are boxes** (their bounding box), so Mario stands at cab height over a pickup's bed.
+- **Map collision is a raycast heightfield** (24 m square, 0.5 m grid) around Mario. Gentle ground is smooth.
+  Steps over 0.35 m become flat tiles with a vertical wall between them. Overhangs are handled with a heuristic,
+  so the interiors of complex buildings and multi-level structures are approximate. Anything thinner than the
+  grid (poles, fences) can be missed. There is no water.
+- **Vehicle hulls are top-down** (the highest node per 0.35 m cell, with walls down to the underside), so Mario
+  can't go under or inside a car. Attacks still aim at the car's bounding box, then dent the nodes nearest the
+  hit.
 - The helper is Windows-only (XInput, waveOut). Sound is not positional.
 - Remote players' Marios are re-posed from synced state (action, animation and frame), so they can look
   slightly off during fast actions.
@@ -85,8 +95,11 @@ Needs MSYS2 with MinGW-w64 gcc (`C:\msys64`), and libsm64's source in `libsm64-m
 ## Tests
 
 - `tests/helper_smoke.py`: drives the real helper over its UDP protocol with your ROM (ground, jump, run,
-  walls, punch hits, car roof).
+  walls, 1 m ledge landing and running jump, rescue from below the ground, punch hits, car roof, hull bed/cab).
 - `tests/Harness/`: runs the BeamMP server plugin in the BeamMP Server Manager project's
   `BeamMpServerLuaHarness` (`dotnet test`).
 - `tests/uat_ingame.py`: full in-game UAT through BeamNG's built-in MCP server. Launch BeamNG with
-  `-enablemcp`, have the helper running, then run the script. It saves screenshots to `tests/shots/`.
+  `-enablemcp`, have the helper running, then run the script. It saves screenshots to `tests/shots/`. The
+  dive check depends on timing: SM64 only dives if Mario is past speed 28 when B lands, otherwise it's a jump
+  kick that fires too early to reach the car, and the test's input timing over MCP isn't frame-exact.
+  `tests/probe_attack.py` runs a single attack against a fresh car for tuning.

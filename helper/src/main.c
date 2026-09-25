@@ -32,6 +32,10 @@ void ng64_audio_stop(void);
 #define ACT_GROUND_POUND      0x008008A9
 #define ACT_GROUND_POUND_LAND 0x0080023C
 #define ACT_FLAG_AIR          0x00000800
+#define ACT_SLIDE_KICK        0x018008AA
+#define ACT_SLIDE_KICK_SLIDE  0x0080045A
+#define ACT_DIVE              0x0188088A
+#define ACT_DIVE_SLIDE        0x00880456
 
 // ---------------------------------------------------------------------------------------------------------------
 // coordinates: sm64 is Y-up, BeamNG is Z-up. sm = (x, z, -y) / S
@@ -224,73 +228,94 @@ static void surf_push(const float *a, const float *b, const float *c, const floa
         for (int k = 0; k < 3; k++) s->vertices[i][k] = (int32_t)lroundf(vs[i][k]);
 }
 
-#define STEP_M 0.7f   // height jump (m) above which neighbouring samples are split by a wall instead of a slope
+// Height jump (m) between neighbouring samples above which the ground is treated as a ledge (flat tiles + wall)
+// rather than a slope. Anything smaller is triangulated smoothly and Mario just walks/steps over it.
+#define STEP_M 0.35f
+
+static void push_quad_up(const float *b0, const float *b1, const float *b2, const float *b3)
+{
+    float s0[3], s1[3], s2[3], s3[3], up[3] = { 0, 1, 0 };
+    bng2sm(b0, s0); bng2sm(b1, s1); bng2sm(b2, s2); bng2sm(b3, s3);
+    surf_push(s0, s1, s2, up);
+    surf_push(s0, s2, s3, up);
+}
 
 static void load_terrain(const uint8_t *p, int len)
 {
-    if (len < 15) return;
+    if (len < 14) return;
     float cx, cy, sp;
     uint16_t n;
     memcpy(&cx, p, 4); memcpy(&cy, p + 4, 4); memcpy(&sp, p + 8, 4); memcpy(&n, p + 12, 2);
-    if (len < 14 + (int)n * n * 4 || n < 2) return;
+    if (n < 2 || len < 14 + (int)n * n * 4) return;
     const float *h = (const float *)(p + 14);
     s_surfCount = 0;
 
-    float up[3] = { 0, 1, 0 };
     float half = (n - 1) * sp * 0.5f;
-#define SAMPLE(i, j) h[(j) * n + (i)]
-#define SM(i, j, out) do { float b_[3] = { cx - half + (i) * sp, cy - half + (j) * sp, SAMPLE(i, j) }; bng2sm(b_, out); } while (0)
+#define H(i, j) h[(j) * n + (i)]
+#define X(i) (cx - half + (i) * sp)
+#define Y(j) (cy - half + (j) * sp)
+#define STEP(a, b) (!isnan(a) && !isnan(b) && fabsf((a) - (b)) > STEP_M)
 
+    // 1) cells whose four edges are all gentle become two smooth triangles; the rest are "ledge" cells
+    uint8_t *needTile = calloc((size_t)n * n, 1);
     for (int j = 0; j < n - 1; j++) {
         for (int i = 0; i < n - 1; i++) {
-            int tris[2][3][2] = { { { i, j }, { i + 1, j }, { i + 1, j + 1 } }, { { i, j }, { i + 1, j + 1 }, { i, j + 1 } } };
-            for (int t = 0; t < 2; t++) {
-                float hs[3];
-                int ok = 1;
-                for (int k = 0; k < 3; k++) {
-                    hs[k] = SAMPLE(tris[t][k][0], tris[t][k][1]);
-                    if (isnan(hs[k])) ok = 0;
-                }
-                if (!ok) continue;
-                float mn = fminf(hs[0], fminf(hs[1], hs[2])), mx = fmaxf(hs[0], fmaxf(hs[1], hs[2]));
-                if (mx - mn > STEP_M) continue;
-                float a[3], b[3], c[3];
-                SM(tris[t][0][0], tris[t][0][1], a);
-                SM(tris[t][1][0], tris[t][1][1], b);
-                SM(tris[t][2][0], tris[t][2][1], c);
-                surf_push(a, b, c, up);
+            float a = H(i, j), b = H(i + 1, j), c = H(i + 1, j + 1), d = H(i, j + 1);
+            int ledge = STEP(a, b) || STEP(b, c) || STEP(c, d) || STEP(d, a);
+            if (!ledge) {
+                float up[3] = { 0, 1, 0 };
+                float pa[3] = { X(i), Y(j), a }, pb[3] = { X(i + 1), Y(j), b }, pc[3] = { X(i + 1), Y(j + 1), c }, pd[3] = { X(i), Y(j + 1), d };
+                float sa[3], sb[3], sc[3], sd[3];
+                bng2sm(pa, sa); bng2sm(pb, sb); bng2sm(pc, sc); bng2sm(pd, sd);
+                if (!isnan(a) && !isnan(b) && !isnan(c)) surf_push(sa, sb, sc, up);
+                if (!isnan(a) && !isnan(c) && !isnan(d)) surf_push(sa, sc, sd, up);
+            } else {
+                needTile[j * n + i] = needTile[j * n + i + 1] = needTile[(j + 1) * n + i] = needTile[(j + 1) * n + i + 1] = 1;
             }
         }
     }
 
-    // vertical walls halfway between neighbours with a big height step, facing the low side
+    // 2) every corner of a ledge cell gets a flat tile of its own height (half a cell each way), so the top of a
+    //    ledge reaches right up to the wall and Mario has something to land on / grab
+    for (int j = 0; j < n; j++) {
+        for (int i = 0; i < n; i++) {
+            float z = H(i, j);
+            if (!needTile[j * n + i] || isnan(z)) continue;
+            float x0 = X(i) - sp * 0.5f, x1 = X(i) + sp * 0.5f, y0 = Y(j) - sp * 0.5f, y1 = Y(j) + sp * 0.5f;
+            float q0[3] = { x0, y0, z }, q1[3] = { x1, y0, z }, q2[3] = { x1, y1, z }, q3[3] = { x0, y1, z };
+            push_quad_up(q0, q1, q2, q3);
+        }
+    }
+
+    // 3) vertical walls on the tile boundary between neighbours with a real step, facing the low side
     for (int j = 0; j < n; j++) {
         for (int i = 0; i < n; i++) {
             for (int d = 0; d < 2; d++) {
                 int i2 = i + (d == 0), j2 = j + (d == 1);
                 if (i2 >= n || j2 >= n) continue;
-                float h1 = SAMPLE(i, j), h2 = SAMPLE(i2, j2);
-                if (isnan(h1) || isnan(h2) || fabsf(h1 - h2) <= STEP_M) continue;
+                float h1 = H(i, j), h2 = H(i2, j2);
+                if (!STEP(h1, h2)) continue;
                 float lo = fminf(h1, h2), hi = fmaxf(h1, h2);
-                float mx = cx - half + (i + i2) * 0.5f * sp, my = cy - half + (j + j2) * 0.5f * sp;
-                // wall spans perpendicular to the neighbour direction, one cell wide
+                float mx = (X(i) + X(i2)) * 0.5f, my = (Y(j) + Y(j2)) * 0.5f;
                 float ex = (d == 0) ? 0 : sp * 0.5f, ey = (d == 0) ? sp * 0.5f : 0;
                 float b0[3] = { mx - ex, my - ey, lo }, b1[3] = { mx + ex, my + ey, lo };
                 float b2[3] = { mx + ex, my + ey, hi }, b3[3] = { mx - ex, my - ey, hi };
                 float s0[3], s1[3], s2[3], s3[3];
                 bng2sm(b0, s0); bng2sm(b1, s1); bng2sm(b2, s2); bng2sm(b3, s3);
                 float dirB[3] = { (float)(i2 - i), (float)(j2 - j), 0 };
-                if (h2 > h1) { dirB[0] = -dirB[0]; dirB[1] = -dirB[1]; }   // face toward the lower sample
+                if (h2 > h1) { dirB[0] = -dirB[0]; dirB[1] = -dirB[1]; }
                 float hint[3];
                 bng2sm(dirB, hint);
-                hint[0] *= S; hint[1] *= S; hint[2] *= S;
                 surf_push(s0, s1, s2, hint);
                 surf_push(s0, s2, s3, hint);
             }
         }
     }
-#undef SAMPLE
-#undef SM
+    free(needTile);
+#undef H
+#undef X
+#undef Y
+#undef STEP
     sm64_static_surfaces_load(s_surfBuf, s_surfCount);
 }
 
@@ -299,9 +324,12 @@ typedef struct {
     int used;
     uint32_t vehId;
     uint32_t objId;
-    float half[3];     // sm64 half extents
+    int isHull;        // objId is the node-derived hull rather than the bounding box
+    float half[3];     // sm64 half extents (bounding box; attacks use it either way)
     float center[3];   // sm64
     float axes[3][3];  // sm64 unit axes (rows)
+    float framePos[3]; // sm64, vehicle reference frame origin
+    float frameRows[3][3];
     DWORD lastSeen;
     int hitCooldown;
 } Vehicle;
@@ -334,17 +362,59 @@ static void box_surfaces(const float *he, struct SM64Surface *out, int *count)
 
 static void axes_to_euler(float r[3][3], float *eulerDeg)
 {
-    // inverse of the decomp's mtxf_rotate_zxy_and_translate (row i = local axis i in world)
+    // inverse of the decomp's mtxf_rotate_zxy_and_translate (row i = local axis i in world); libsm64's
+    // CONVERT_ANGLE negates whatever we pass, so hand it the negated angles
     float sx = -r[2][1];
     if (sx > 1) sx = 1;
     if (sx < -1) sx = -1;
     float x = asinf(sx);
     float y = atan2f(r[2][0], r[2][2]);
     float z = atan2f(r[0][1], r[1][1]);
-    eulerDeg[0] = x * 180.0f / PI;
-    eulerDeg[1] = y * 180.0f / PI;
-    eulerDeg[2] = z * 180.0f / PI;
+    eulerDeg[0] = -x * 180.0f / PI;
+    eulerDeg[1] = -y * 180.0f / PI;
+    eulerDeg[2] = -z * 180.0f / PI;
 }
+
+static void unit_sm(const float *b, float *out)
+{
+    float t[3];
+    bng2sm(b, t);
+    float l = sqrtf(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
+    for (int k = 0; k < 3; k++) out[k] = l > 1e-6f ? t[k] / l : 0;
+}
+
+// Vehicle frame (bng origin, forward, up) -> sm64 object rows. Hull coords are bng-style (x right, y forward,
+// z up) run through bng2sm, so the rows are the sm64 images of right, up and -forward.
+static void frame_rows(const float *fwdB, const float *upB, float rows[3][3])
+{
+    float rightB[3] = { fwdB[1] * upB[2] - fwdB[2] * upB[1], fwdB[2] * upB[0] - fwdB[0] * upB[2], fwdB[0] * upB[1] - fwdB[1] * upB[0] };
+    float f[3];
+    unit_sm(rightB, rows[0]);
+    unit_sm(upB, rows[1]);
+    unit_sm(fwdB, f);
+    for (int k = 0; k < 3; k++) rows[2][k] = -f[k];
+}
+
+static void vehicle_move(Vehicle *veh)
+{
+    struct SM64ObjectTransform t;
+    if (veh->isHull) {
+        memcpy(t.position, veh->framePos, 12);
+        axes_to_euler(veh->frameRows, t.eulerRotation);
+    } else {
+        memcpy(t.position, veh->center, 12);
+        axes_to_euler(veh->axes, t.eulerRotation);
+    }
+    sm64_surface_object_move(veh->objId, &t);
+}
+
+static Vehicle *vehicle_find(uint32_t id)
+{
+    for (int i = 0; i < MAX_VEH; i++) if (s_veh[i].used && s_veh[i].vehId == id) return &s_veh[i];
+    return NULL;
+}
+
+#define VEH_REC 88   // u32 id; f32 oobbCenter[3], oobbHalfAxes[3][3], origin[3], fwd[3], up[3]
 
 static void update_vehicles(const uint8_t *p, int len)
 {
@@ -353,12 +423,15 @@ static void update_vehicles(const uint8_t *p, int len)
     memcpy(&count, p, 2);
     p += 2; len -= 2;
     DWORD now = GetTickCount();
-    for (int v = 0; v < count && len >= 52; v++, p += 52, len -= 52) {
+    for (int v = 0; v < count && len >= VEH_REC; v++, p += VEH_REC, len -= VEH_REC) {
         uint32_t id;
-        float c[3], ha[3][3];
+        float c[3], ha[3][3], org[3], fwdB[3], upB[3];
         memcpy(&id, p, 4);
         memcpy(c, p + 4, 12);
         memcpy(ha, p + 16, 36);
+        memcpy(org, p + 52, 12);
+        memcpy(fwdB, p + 64, 12);
+        memcpy(upB, p + 76, 12);
 
         float center[3], axes[3][3], half[3];
         bng2sm(c, center);
@@ -380,11 +453,18 @@ static void update_vehicles(const uint8_t *p, int len)
             if (!s_veh[i].used && !freeSlot) freeSlot = &s_veh[i];
         }
         int rebuild = !veh;
-        if (veh)
+        if (veh && !veh->isHull)
             for (int a = 0; a < 3; a++) if (fabsf(veh->half[a] - half[a]) > 8.0f) rebuild = 1;
+        if (!veh && !freeSlot) continue;
+        if (!veh) { veh = freeSlot; memset(veh, 0, sizeof(*veh)); }
+        memcpy(veh->center, center, 12);
+        memcpy(veh->axes, axes, sizeof(axes));
+        memcpy(veh->half, half, 12);
+        bng2sm(org, veh->framePos);
+        frame_rows(fwdB, upB, veh->frameRows);
         if (rebuild) {
-            if (veh) sm64_surface_object_delete(veh->objId);
-            else if (!(veh = freeSlot)) continue;
+            // bounding box until the vehicle sends its hull
+            if (veh->used) sm64_surface_object_delete(veh->objId);
             struct SM64Surface surfs[12];
             int n;
             box_surfaces(half, surfs, &n);
@@ -394,17 +474,12 @@ static void update_vehicles(const uint8_t *p, int len)
             memcpy(obj.transform.position, center, 12);
             axes_to_euler(axes, obj.transform.eulerRotation);
             veh->objId = sm64_surface_object_create(&obj);
+            veh->isHull = 0;
             veh->used = 1;
             veh->vehId = id;
-            memcpy(veh->half, half, 12);
         } else {
-            struct SM64ObjectTransform t;
-            memcpy(t.position, center, 12);
-            axes_to_euler(axes, t.eulerRotation);
-            sm64_surface_object_move(veh->objId, &t);
+            vehicle_move(veh);
         }
-        memcpy(veh->center, center, 12);
-        memcpy(veh->axes, axes, sizeof(axes));
         veh->lastSeen = now;
     }
     for (int i = 0; i < MAX_VEH; i++) {
@@ -413,6 +488,71 @@ static void update_vehicles(const uint8_t *p, int len)
             s_veh[i].used = 0;
         }
     }
+}
+
+// Hull from the vehicle's own nodes: a grid (vehicle frame) of the highest node in each cell. Each cell is a flat
+// tile with walls down to its lower neighbour (or the underside), so roofs, beds, hoods and bumpers sit where they
+// really are instead of inside one big box.
+static void load_hull(const uint8_t *p, int len)
+{
+    if (len < 24) return;
+    uint32_t id;
+    float cell, x0, y0, bottom;
+    uint16_t nx, ny;
+    memcpy(&id, p, 4); memcpy(&cell, p + 4, 4); memcpy(&x0, p + 8, 4); memcpy(&y0, p + 12, 4); memcpy(&bottom, p + 16, 4);
+    memcpy(&nx, p + 20, 2); memcpy(&ny, p + 22, 2);
+    if (nx < 1 || ny < 1 || nx > 64 || ny > 64 || len < 24 + nx * ny * 4) return;
+    const float *top = (const float *)(p + 24);
+    Vehicle *veh = vehicle_find(id);
+    if (!veh) return;
+
+    static const int dirs[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+    float upH[3] = { 0, 1, 0 };
+    int saved = s_surfCount;
+#define T(i, j) (((i) < 0 || (j) < 0 || (i) >= nx || (j) >= ny) ? NAN : top[(j) * nx + (i)])
+    for (int j = 0; j < ny; j++) {
+        for (int i = 0; i < nx; i++) {
+            float t = T(i, j);
+            if (isnan(t)) continue;
+            float xa = x0 + i * cell, xb = xa + cell, ya = y0 + j * cell, yb = ya + cell;
+            float q0[3] = { xa, ya, t }, q1[3] = { xb, ya, t }, q2[3] = { xb, yb, t }, q3[3] = { xa, yb, t };
+            float s0[3], s1[3], s2[3], s3[3];
+            bng2sm(q0, s0); bng2sm(q1, s1); bng2sm(q2, s2); bng2sm(q3, s3);
+            surf_push(s0, s1, s2, upH);
+            surf_push(s0, s2, s3, upH);
+            for (int d = 0; d < 4; d++) {
+                float tn = T(i + dirs[d][0], j + dirs[d][1]);
+                float lo = isnan(tn) ? bottom : fmaxf(tn, bottom);
+                if (t - lo < 0.02f) continue;
+                float e0x, e0y, e1x, e1y;
+                if (dirs[d][0] == 1)       { e0x = xb; e0y = ya; e1x = xb; e1y = yb; }
+                else if (dirs[d][0] == -1) { e0x = xa; e0y = ya; e1x = xa; e1y = yb; }
+                else if (dirs[d][1] == 1)  { e0x = xa; e0y = yb; e1x = xb; e1y = yb; }
+                else                       { e0x = xa; e0y = ya; e1x = xb; e1y = ya; }
+                float w0[3] = { e0x, e0y, lo }, w1[3] = { e1x, e1y, lo }, w2[3] = { e1x, e1y, t }, w3[3] = { e0x, e0y, t };
+                float hb[3] = { (float)dirs[d][0], (float)dirs[d][1], 0 }, hs[3];
+                bng2sm(hb, hs);
+                bng2sm(w0, s0); bng2sm(w1, s1); bng2sm(w2, s2); bng2sm(w3, s3);
+                surf_push(s0, s1, s2, hs);
+                surf_push(s0, s2, s3, hs);
+            }
+        }
+    }
+#undef T
+    int n = s_surfCount - saved;
+    if (n == 0) return;
+    struct SM64SurfaceObject obj = { 0 };
+    obj.surfaceCount = n;
+    obj.surfaces = malloc(sizeof(struct SM64Surface) * n);
+    memcpy(obj.surfaces, s_surfBuf + saved, sizeof(struct SM64Surface) * n);
+    s_surfCount = saved;
+    memcpy(obj.transform.position, veh->framePos, 12);
+    axes_to_euler(veh->frameRows, obj.transform.eulerRotation);
+    sm64_surface_object_delete(veh->objId);
+    veh->objId = sm64_surface_object_create(&obj);
+    veh->isHull = 1;
+    free(obj.surfaces);
+    logf_("vehicle %u hull: %dx%d cells, %d surfaces", id, nx, ny, n);
 }
 
 // point inside vehicle box (sm64 space), with margin; returns closest point on box too
@@ -450,18 +590,25 @@ static void send_hit(const Vehicle *v, const float *smPoint, const float *smDir,
 static void check_attacks(Mario *m)
 {
     const struct SM64MarioState *st = &m->state;
-    int punch = (st->flags & (MARIO_PUNCHING | MARIO_KICKING | MARIO_TRIPPING)) != 0;
-    int pound = st->action == ACT_GROUND_POUND_LAND || (st->action == ACT_GROUND_POUND && st->velocity[1] < -20.0f);
+    uint32_t act = st->action;
+    // strength per attack; the vehicle side scales both the dent and the shove by it
+    float strength = 0, height = 60;
+    if (act == ACT_SLIDE_KICK || act == ACT_SLIDE_KICK_SLIDE) { strength = 1.6f; height = 25; }
+    else if (act == ACT_DIVE || act == ACT_DIVE_SLIDE) { strength = 1.2f; height = 30; }
+    else if (st->flags & MARIO_KICKING) strength = 1.4f;
+    else if (st->flags & MARIO_TRIPPING) { strength = 1.2f; height = 20; }   // sweep kick
+    else if (st->flags & MARIO_PUNCHING) strength = 1.0f;
+    int pound = act == ACT_GROUND_POUND_LAND || (act == ACT_GROUND_POUND && st->velocity[1] < -20.0f);
+
+    float fwd[3] = { sinf(st->faceAngle), 0, cosf(st->faceAngle) };
     for (int i = 0; i < MAX_VEH; i++) {
         Vehicle *v = &s_veh[i];
         if (!v->used) continue;
         if (v->hitCooldown > 0) { v->hitCooldown--; continue; }
-        float fwd[3] = { sinf(st->faceAngle), 0, cosf(st->faceAngle) };
         float closest[3];
-        if (punch) {
-            float pt[3] = { st->position[0] + fwd[0] * 70, st->position[1] + 60, st->position[2] + fwd[2] * 70 };
-            if (point_near_box(v, pt, 25, closest)) {
-                float strength = (st->flags & MARIO_KICKING) ? 1.4f : 1.0f;
+        if (strength > 0) {
+            float pt[3] = { st->position[0] + fwd[0] * 70, st->position[1] + height, st->position[2] + fwd[2] * 70 };
+            if (point_near_box(v, pt, 30, closest)) {
                 send_hit(v, closest, fwd, strength);
                 v->hitCooldown = 12;
             }
@@ -469,7 +616,7 @@ static void check_attacks(Mario *m)
             float pt[3] = { st->position[0], st->position[1] - 20, st->position[2] };
             if (point_near_box(v, pt, 30, closest)) {
                 float down[3] = { 0, -1, 0 };
-                send_hit(v, closest, down, 1.8f);
+                send_hit(v, closest, down, 2.2f);
                 v->hitCooldown = 20;
             }
         }
@@ -725,6 +872,7 @@ static void handle_packet(const uint8_t *p, int len)
         break;
     }
     case MSG_VEHICLES: update_vehicles(p, len); break;
+    case MSG_HULL: load_hull(p, len); break;
     case MSG_HURT: {
         Mario *m = mario_find(0);
         if (m && len >= 14) {
@@ -923,6 +1071,21 @@ int main(int argc, char **argv)
                 in.camLookZ = -1;
             }
             sm64_mario_tick(m->id, &in, &m->state, &m->geo);
+            if (m->key == 0) {
+                // fell through a gap in the sampled collision (e.g. outran the terrain refresh): with nothing at all
+                // below him he would fall forever, so put him back on the nearest surface above
+                const float *pos = m->state.position;
+                struct SM64SurfaceCollisionData *below = NULL, *over = NULL;
+                sm64_surface_find_floor(pos[0], pos[1] + 30, pos[2], &below);
+                if (!below) {
+                    float above = sm64_surface_find_floor(pos[0], pos[1] + 6000, pos[2], &over);
+                    if (over) {
+                        sm64_set_mario_position(m->id, pos[0], above + 1, pos[2]);
+                        sm64_set_mario_velocity(m->id, 0, 0, 0);
+                        logf_("rescued mario from below the collision (%.0f -> %.0f)", pos[1], above);
+                    }
+                }
+            }
             if (m->key == 0) {
                 update_camera(m, &pad, (float)tickSec);
                 check_attacks(m);

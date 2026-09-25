@@ -139,6 +139,17 @@ check(abs(z0 - ground) < 0.15, "Mario standing on the map (mario z %.2f, ground 
 check(st.get("health") == 2176, "full health (%s)" % st.get("health"))
 shot("01_spawned")
 
+# flicker: grab the game window straight off the desktop; Mario must be on screen in every grab
+import subprocess
+ps = "/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+here = os.path.dirname(os.path.abspath(__file__)).replace("/f/", "F:/")
+os.makedirs(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tmp"), exist_ok=True)
+env = dict(os.environ, TEMP=here + "/.tmp", TMP=here + "/.tmp", SystemRoot="C:\Windows")   # msys python passes neither
+cap = subprocess.run([ps, "-ExecutionPolicy", "Bypass", "-File", here + "/flicker_capture.ps1", "-Frames", "80"],
+                     capture_output=True, text=True, env=env).stdout
+counts = [int(c) for c in cap.split("COUNTS")[-1].strip().split(",")] if "COUNTS" in cap else []
+check(len(counts) == 80 and min(counts) > 20, "no flicker: Mario visible in %d/%d desktop grabs (min red %s)" % (sum(1 for c in counts if c > 20), len(counts), min(counts) if counts else None))
+
 # -- jump / run -------------------------------------------------------------------------------------------------------
 lua("ng64.scriptInput(0,0,true,false,false,6)")
 peak = z0
@@ -165,48 +176,92 @@ time.sleep(4)
 st = status()
 check(st.get("active") is True, "Mario still active after another vehicle spawned")
 
-# stand 0.5 m off the car's side (its shortest horizontal half-axis), facing it
-side = lua("""local id=%s local c=vec3(be:getObjectOOBBCenterXYZ(id)) local best,bl
+def car_geo():
+    # centre, forward, and the car's side axis (shortest horizontal half-axis) with its half-length
+    r = lua("""local id=%s local c=vec3(be:getObjectOOBBCenterXYZ(id)) local best,bl
 for i=0,2 do local a=vec3(be:getObjectOOBBHalfAxisXYZ(id,i)) if math.abs(a.z)<0.5*a:length() and (not bl or a:length()<bl) then best,bl=a,a:length() end end
-local n=best/bl local p=c+n*(bl+0.5)
-return string.format('%%f %%f %%f %%f %%f', p.x,p.y,n.x,n.y,c.z)""" % carId).split()[-5:]
-sx, sy, nx, ny, ccz = map(float, side)
-lua("ng64.teleport(%f,%f,%f)" % (sx, sy, mz + 0.2))
-time.sleep(0.8)
-lua("ng64.scriptInput(0,-0.2,false,false,false,3,%f,%f)" % (-nx, -ny))
-time.sleep(0.4)
-hits0 = status().get("hits", 0)
-dmg0 = float(lua("return tostring(map.objects[%s] and map.objects[%s].damage or -1)" % (carId, carId)).split()[-1])
-vel0 = lua("return tostring(be:getObjectByID(%s):getVelocity():length())" % carId)
-lua("ng64.scriptInput(0,0,false,true,false,4,%f,%f)" % (-nx, -ny))
-time.sleep(0.25)
-shot("03_punch")
-time.sleep(1.0)
-lua("ng64.scriptInput(0,0,false,true,false,4,%f,%f)" % (-nx, -ny))
-time.sleep(0.5)
-lua("ng64.scriptInput(0,0,false,true,false,4,%f,%f)" % (-nx, -ny))
-time.sleep(1.5)
-logs = pull_logs()
-check(status().get("hits", 0) > hits0, "punch/kick registered on the car (%d hits)" % (status().get("hits", 0) - hits0))
-dmg1 = float(lua("return tostring(map.objects[%s].damage)" % carId).split()[-1])
-check(dmg1 > dmg0, "car took damage %.0f -> %.0f" % (dmg0, dmg1))
+local n=best/bl local f=be:getObjectByID(id):getDirectionVector()
+return string.format('%%f %%f %%f %%f %%f %%f %%f %%f', c.x,c.y,c.z,n.x,n.y,bl,f.x,f.y)""" % carId).split()[-8:]
+    return list(map(float, r))
 
-# ground pound on the roof
-cp = lua("local p=vec3(be:getObjectOOBBCenterXYZ(%s)) return string.format('%%f %%f %%f', p.x,p.y,p.z)" % carId).split()[-3:]
-cx, cy, cz = map(float, cp)
-lua("ng64.teleport(%f,%f,%f)" % (cx, cy, cz + 3.5))
+
+def damage():
+    return float(lua("return tostring(map.objects[%s] and map.objects[%s].damage or -1)" % (carId, carId)).split()[-1])
+
+
+def settle_car():
+    time.sleep(1.5)
+
+
+check(bool(wait_for(lambda: status().get("hulls", 0) > 0, 6)), "vehicle hull received from the car's nodes (%s)" % status().get("hulls"))
+
+def fresh_car():
+    # every attack gets an undamaged, unmoved pickup so one test's shove can't spoil the next
+    global carId
+    lua("if _ng64uatCar then _ng64uatCar:delete() end _ng64uatCar = core_vehicles.spawnNewVehicle('pickup', {pos=vec3(%f,%f,%f), rot=quatFromDir(vec3(1,0,0), vec3(0,0,1)), autoEnterVehicle=false}) return 'ok'" % (mx, my + 4.5, mz + 0.5))
+    carId = lua("return tostring(_ng64uatCar:getID())").strip().split()[-1]
+    time.sleep(4)
+    wait_for(lambda: status().get("hulls", 0) > hullsBefore[0], 6)
+    hullsBefore[0] = status().get("hulls", 0)
+
+hullsBefore = [0]
+
+
+def attack(name, approach, inputs, min_damage):
+    fresh_car()
+    cx, cy, cz, nx, ny, half, fx, fy = car_geo()
+    sx, sy = cx + nx * (half + approach), cy + ny * (half + approach)
+    lua("ng64.teleport(%f,%f,%f)" % (sx, sy, mz + 0.2))
+    time.sleep(0.8)
+    lua("ng64.scriptInput(0,-0.2,false,false,false,3,%f,%f)" % (-nx, -ny))   # face the car
+    time.sleep(0.4)
+    h0, d0 = status().get("hits", 0), damage()
+    for step in inputs:
+        stick, a, b, z, frames, wait = step[:6]
+        lua("ng64.scriptInput(0,%f,%s,%s,%s,%d,%f,%f)" % (stick, a, b, z, frames, -nx, -ny))
+        if len(step) > 6:
+            # run-up: keep going until Mario is this close to the car's side, instead of trusting a timer
+            wait_for(lambda: (lambda p: (p[0] - cx) * nx + (p[1] - cy) * ny - half < step[6])(status()["pos"]), 3, 0.02)
+        else:
+            time.sleep(wait)
+    shot("03_" + name)
+    time.sleep(1.5)
+    h1, d1 = status().get("hits", 0), damage()
+    check(h1 > h0, "%s registered on the car (%d hits)" % (name, h1 - h0))
+    check(d1 - d0 >= min_damage, "%s dented the car: damage %.0f -> %.0f" % (name, d0, d1))
+    settle_car()
+
+attack("punch", 0.45, [(0, "false", "true", "false", 4, 0.1)], 1000)
+# dive = B in the air at speed: run, jump, then B
+attack("dive", 9.0, [(-1, "false", "false", "false", 90, 0, 2.0), (-1, "true", "false", "false", 3, 0.1), (-1, "false", "true", "false", 4, 0.1)], 1000)
+# slide kick needs speed: run, crouch into a slide, then B
+attack("slide_kick", 7.0, [(-1, "false", "false", "false", 90, 0, 2.0), (-1, "false", "false", "true", 3, 0.1), (-1, "false", "true", "true", 4, 0.1)], 1000)
+
+# hull: the pickup's bed is lower than its cab roof
+fresh_car()
+cx, cy, cz, nx, ny, half, fx, fy = car_geo()
+def drop_at(off):
+    lua("ng64.teleport(%f,%f,%f)" % (cx + fx * off, cy + fy * off, cz + 2.5))
+    time.sleep(2.0)
+    return status()["pos"][2]
+zb = drop_at(-1.6)
+zc = drop_at(0.1)
+check(zc - zb > 0.3 and zb > mz + 0.3, "lands in the pickup bed (z %.2f) below the cab roof (z %.2f)" % (zb, zc))
+shot("05_on_roof")
+
+# ground pound on the cab roof
+d0 = damage()
+lua("ng64.teleport(%f,%f,%f)" % (cx + fx * 0.1, cy + fy * 0.1, cz + 3.5))
 time.sleep(0.35)
 lua("ng64.scriptInput(0,0,false,false,true,6)")
 time.sleep(0.15)
 shot("04_groundpound")
 time.sleep(1.5)
-dmg2 = float(lua("return tostring(map.objects[%s].damage)" % carId).split()[-1])
-check(dmg2 > dmg1, "ground pound damaged the car %.0f -> %.0f" % (dmg1, dmg2))
-st = status()
-check(st["pos"][2] > cz + 0.3, "Mario standing on the car roof (z %.2f, car centre %.2f)" % (st["pos"][2], cz))
-shot("05_on_roof")
+d1 = damage()
+check(d1 - d0 >= 5000, "ground pound crushed the roof: damage %.0f -> %.0f" % (d0, d1))
 
 # car drives into Mario -> Mario gets hurt
+cx, cy, cz, nx, ny, half, fx, fy = car_geo()
 lua("ng64.teleport(%f,%f,%f)" % (cx + 7, cy, mz + 0.2))
 time.sleep(1.5)
 h0 = status()["health"]

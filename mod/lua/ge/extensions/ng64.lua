@@ -9,7 +9,7 @@ local logTag = "ng64"
 local ffi = require("ffi")
 
 local HELPER_HOST, HELPER_PORT = "127.0.0.1", 47064
-local PROTO_VERSION = 1
+local PROTO_VERSION = 2
 local STUB_MODEL = "ng64_mario"
 
 local GRID_N, GRID_SP = 49, 0.5         -- terrain sample grid around Mario (24 m square)
@@ -58,7 +58,7 @@ local grid                    -- in-progress terrain sample job
 local gridCenter              -- vec3 of the last sent grid
 
 local mpAccum = 0
-local hitCount, hurtCount = 0, 0   -- for UAT
+local hitCount, hurtCount, hullCount = 0, 0, 0   -- for UAT
 local simTime = 0
 
 -- ------------------------------------------------------------------------------------------------------------
@@ -137,25 +137,38 @@ local function buildMesh(key, pf)
   local pos, vel = pf.pos, pf.vel
   local entry = meshes[key]
   if not entry then
-    local obj = createObject("ProceduralMesh")
-    obj:registerObject("ng64_mario_mesh_" .. tostring(key))
-    obj.canSave = false
-    scenetree.MissionGroup:addObject(obj.obj)
-    entry = { obj = obj }
+    -- two meshes, double-buffered: createMesh leaves the object blank until the next rendered frame, so we build
+    -- into the hidden one, show it, and only hide the previous one a couple of frames later (no blank frames)
+    entry = { objs = {}, front = 1 }
+    for i = 1, 2 do
+      local obj = createObject("ProceduralMesh")
+      obj:registerObject("ng64_mario_mesh_" .. tostring(key) .. "_" .. i)
+      obj.canSave = false
+      scenetree.MissionGroup:addObject(obj.obj)
+      obj:setHidden(true)
+      entry.objs[i] = obj
+    end
     meshes[key] = entry
   end
   if nv > 0 and materialName then
-    entry.obj:createMesh({ { { verts = verts, normals = normals, uvs = uvs, faces = faces, material = materialName } } })
+    local back = 3 - entry.front
+    local obj = entry.objs[back]
+    obj:createMesh({ { { verts = verts, normals = normals, uvs = uvs, faces = faces, material = materialName } } })
+    obj:setPosition(pos)
+    obj:setHidden(false)
+    if entry.hideObj and entry.hideObj ~= entry.objs[entry.front] then entry.hideObj:setHidden(true) end
+    entry.hideObj, entry.hideFrames = entry.objs[entry.front], 2
+    entry.front = back
+    entry.obj = obj
   end
   entry.pos = pos
   entry.vel = vel
   entry.frameTime = simTime
-  entry.obj:setPosition(entry.pos)
 end
 
 local function deleteMesh(key)
   local e = meshes[key]
-  if e and e.obj then e.obj:delete() end
+  if e then for _, o in ipairs(e.objs) do o:delete() end end
   meshes[key] = nil
 end
 
@@ -211,7 +224,15 @@ local function isStub(veh)
   return veh and veh.JBeam == STUB_MODEL
 end
 
-local function sendVehicles(marioPos)
+local HULL_REFRESH = 2.0            -- seconds between re-reading a vehicle's node shape
+local hullAge = {}                  -- vehicle id -> seconds since its hull was last requested
+
+local function requestHull(veh)
+  veh:queueLuaCommand("if not ng64Hit then extensions.load('ng64Hit') end ng64Hit.sendHull()")
+  hullAge[veh:getID()] = 0
+end
+
+local function sendVehicles(marioPos, dt)
   local parts, count = {}, 0
   for i = 0, be:getObjectCount() - 1 do
     local veh = be:getObject(i)
@@ -222,8 +243,13 @@ local function sendVehicles(marioPos)
         local a0x, a0y, a0z = be:getObjectOOBBHalfAxisXYZ(id, 0)
         local a1x, a1y, a1z = be:getObjectOOBBHalfAxisXYZ(id, 1)
         local a2x, a2y, a2z = be:getObjectOOBBHalfAxisXYZ(id, 2)
-        parts[#parts + 1] = packU32(id) .. packF(cx, cy, cz, a0x, a0y, a0z, a1x, a1y, a1z, a2x, a2y, a2z)
+        local o, f, u = veh:getPosition(), veh:getDirectionVector(), veh:getDirectionVectorUp()
+        parts[#parts + 1] = packU32(id) .. packF(cx, cy, cz, a0x, a0y, a0z, a1x, a1y, a1z, a2x, a2y, a2z,
+          o.x, o.y, o.z, f.x, f.y, f.z, u.x, u.y, u.z)
         count = count + 1
+        local age = (hullAge[id] or HULL_REFRESH) + (dt or 0)
+        hullAge[id] = age
+        if age >= HULL_REFRESH then requestHull(veh) end
       end
     end
   end
@@ -281,6 +307,7 @@ local function applyHit(data)
     h.point[0], h.point[1], h.point[2], h.dir[0], h.dir[1], h.dir[2], h.strength))
   hitCount = hitCount + 1
   log("I", logTag, string.format("mario hit vehicle %d (strength %.1f)", h.vehId, h.strength))
+  hullAge[tonumber(h.vehId)] = HULL_REFRESH - 0.4   -- re-read the dented shape shortly
 end
 
 -- ------------------------------------------------------------------------------------------------------------
@@ -470,9 +497,13 @@ local function onUpdate(dtReal, dtSim, dtRaw)
 
   -- smooth the meshes between 30 Hz frames
   for key, e in pairs(meshes) do
-    if e.pos and e.frameTime then
+    if e.obj and e.pos and e.frameTime then
       local ahead = math.min(simTime - e.frameTime, 0.05)
       e.obj:setPosition(e.pos + e.vel * ahead)
+    end
+    if e.hideObj then
+      e.hideFrames = e.hideFrames - 1
+      if e.hideFrames <= 0 then e.hideObj:setHidden(true) e.hideObj = nil end
     end
     if key ~= 0 and remoteNames[key] and simTime - remoteNames[key] > 3 then
       deleteMesh(key)
@@ -492,13 +523,22 @@ local function onUpdate(dtReal, dtSim, dtRaw)
       startGrid(pos)
     end
     stepGrid(GRID_SAMPLES_PER_FRAME)
-    sendVehicles(pos)
+    sendVehicles(pos, dt)
     checkVehicleHurt(pos, lastLocalFrame.vel, dt)
     sendMpState(dt)
     applyCamera()
   elseif connected then
     sendVehicles(nil)
   end
+end
+
+-- called from the vehicle VM (ng64Hit.sendHull) with its node height grid
+local function onHull(id, cell, x0, y0, bottom, nx, ny, csv)
+  local vals = {}
+  for tok in string.gmatch(csv, "[^,]+") do vals[#vals + 1] = (tok == "n") and (0 / 0) or tonumber(tok) end
+  if #vals ~= nx * ny then return end
+  hullCount = hullCount + 1
+  sendRaw("U" .. packU32(id) .. packF(cell, x0, y0, bottom) .. packU16(nx) .. packU16(ny) .. packF(unpack(vals)))
 end
 
 local function onVehicleSpawned(vid)
@@ -548,6 +588,9 @@ local function scriptInput(stickX, stickY, a, b, z, frames, dirX, dirY)
 end
 
 local function teleport(x, y, z)
+  -- collision around the destination first, so he doesn't arrive over nothing
+  startGrid(vec3(x, y, z))
+  stepGrid(GRID_N * GRID_N)
   sendRaw("M" .. packF(x, y, z))
 end
 
@@ -556,7 +599,7 @@ local function getStatus()
   return {
     connected = connected, active = active, stubId = stubId, material = materialName,
     pos = f and { f.pos.x, f.pos.y, f.pos.z }, health = f and f.health, action = f and f.action,
-    numVerts = f and f.numVerts, frameAge = f and (simTime - localFrameTime), hits = hitCount, hurts = hurtCount,
+    numVerts = f and f.numVerts, frameAge = f and (simTime - localFrameTime), hits = hitCount, hurts = hurtCount, hulls = hullCount,
     meshes = (function() local n = 0 for _ in pairs(meshes) do n = n + 1 end return n end)(),
   }
 end
@@ -572,5 +615,6 @@ M.scriptInput = scriptInput
 M.teleport = teleport
 M.getStatus = getStatus
 M.onRemote = onRemote
+M.onHull = onHull
 M.onRemoteGone = onRemoteGone
 return M
