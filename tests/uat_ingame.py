@@ -266,6 +266,7 @@ cx, cy, cz, nx, ny, half, fx, fy = car_geo()
 lua("ng64.teleport(%f,%f,%f)" % (cx + 7, cy, mz + 0.2))
 time.sleep(1.5)
 h0 = status()["health"]
+cd0 = damage()
 check(h0 == 2176, "Mario's own attacks shoving cars away never hurt him (health %s)" % h0)
 lua("be:getObjectByID(%s):queueLuaCommand(\"if not ng64Hit then extensions.load('ng64Hit') end ng64Hit.hit(%f,%f,%f,1,0,0,9)\")" % (carId, cx - 200, cy, cz))
 acts = set()
@@ -279,6 +280,9 @@ for _ in range(15):
 shot("06_run_over")
 check(bool(hurt), "vehicle hitting Mario hurts him (health %s -> %s)" % (h0, status()["health"]))
 check(0x010208BE in acts, "run over: thrown clear (SM64 thrown-backward knockback)")
+time.sleep(1.0)
+cd1 = damage()
+check(cd1 - cd0 > 50, "the car that hit Mario took some damage: %.0f -> %.0f" % (cd0, cd1))
 time.sleep(2.5)
 # afterwards he must not be inside the car: under its roof line within its footprint
 inside = lua("""local id=%s local p=vec3(ng64.getStatus().pos[1], ng64.getStatus().pos[2], ng64.getStatus().pos[3])

@@ -58,7 +58,7 @@ local grid                    -- in-progress terrain sample job
 local gridCenter              -- vec3 of the last sent grid
 
 local mpAccum = 0
-local hitCount, hurtCount, hullCount = 0, 0, 0   -- for UAT
+local hitCount, hurtCount, hullCount, carDentCount = 0, 0, 0, 0   -- for UAT
 local simTime = 0
 
 -- ------------------------------------------------------------------------------------------------------------
@@ -297,6 +297,13 @@ local function checkVehicleHurt(marioPos, marioVel, dt)
           sendRaw("K" .. packF(c.x, c.y, c.z) .. string.char(dmg, speed > 15 and 1 or 0) .. packF(vel.x, vel.y, vel.z))
           hurtCooldown = 1.0
           hurtCount = hurtCount + 1
+          -- the car takes a small dent where it hit him: a light, speed-scaled push into the body, no shove
+          local contact = marioPos + vec3(0, 0, 0.6)
+          local into = -(flat / flat:length())
+          veh:queueLuaCommand(string.format(
+            "if not ng64Hit then extensions.load('ng64Hit') end ng64Hit.hit(%f,%f,%f,%f,%f,%f,%f,0)",
+            contact.x, contact.y, contact.z, into.x, into.y, into.z, math.min(0.9, math.max(0.5, speed / 15))))   -- bumpers ignore anything under ~0.5
+          carDentCount = carDentCount + 1
           log("I", logTag, string.format("vehicle %d hit mario at %.1f m/s (damage %d)", id, speed, dmg))
           return
         end
@@ -617,7 +624,7 @@ local function getStatus()
   return {
     connected = connected, active = active, stubId = stubId, material = materialName,
     pos = f and { f.pos.x, f.pos.y, f.pos.z }, health = f and f.health, action = f and f.action,
-    numVerts = f and f.numVerts, frameAge = f and (simTime - localFrameTime), hits = hitCount, hurts = hurtCount, hulls = hullCount,
+    numVerts = f and f.numVerts, frameAge = f and (simTime - localFrameTime), hits = hitCount, hurts = hurtCount, hulls = hullCount, carDents = carDentCount,
     meshes = (function() local n = 0 for _ in pairs(meshes) do n = n + 1 end return n end)(),
   }
 end

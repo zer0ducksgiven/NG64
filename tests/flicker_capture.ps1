@@ -22,7 +22,7 @@ $r = New-Object W+RECT
 [W]::GetWindowRect($p.MainWindowHandle, [ref]$r) | Out-Null
 $w = $r.R - $r.L; $h = $r.B - $r.T
 # region: most of the window (Mario can drift off-centre while the camera swings round); skips the HUD corners
-$rx = $r.L + [int]($w * 0.15); $ry = $r.T + [int]($h * 0.2); $rw = [int]($w * 0.7); $rh = [int]($h * 0.5)
+$rx = $r.L + [int]($w * 0.15); $ry = $r.T + [int]($h * 0.2); $rw = [int]($w * 0.7); $rh = [int]($h * 0.72)
 $bmp = New-Object System.Drawing.Bitmap $rw, $rh
 $g = [System.Drawing.Graphics]::FromImage($bmp)
 $counts = @()

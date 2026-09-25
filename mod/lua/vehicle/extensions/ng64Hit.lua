@@ -20,7 +20,7 @@ end
 
 local pending = {}
 
-local function hit(px, py, pz, dx, dy, dz, strength)
+local function hit(px, py, pz, dx, dy, dz, strength, shoveScale)
   local d = vec3(dx, dy, dz)
   if d:length() < 1e-4 then return end
   d:normalize()
@@ -39,7 +39,7 @@ local function hit(px, py, pz, dx, dy, dz, strength)
     near[#near + 1] = { cand[i][1], w }
     wsum = wsum + w
   end
-  pending[#pending + 1] = { d = d, s = strength or 1, t = HIT_TIME, near = near, wsum = wsum }
+  pending[#pending + 1] = { d = d, s = strength or 1, t = HIT_TIME, near = near, wsum = wsum, shove = shoveScale or 1 }
   local info = string.format("hit strength %.1f at (%.2f %.2f %.2f) dir (%.2f %.2f %.2f): %d nodes within %.1f m, nearest %.2f m",
     strength or 1, px, py, pz, d.x, d.y, d.z, #near, DENT_RADIUS, cand[1] and cand[1][2] or -1)
   log("I", "ng64Hit", info)
@@ -52,10 +52,12 @@ local function updateGFX(dt)
     local h = pending[i]
     local step = math.min(dt, h.t)
     -- whole-vehicle shove: same acceleration on every node
-    local shoveAccel = SHOVE_DV * h.s / HIT_TIME
-    for cid = 0, nodeCount - 1 do
-      local mass = obj:getNodeMass(cid)
-      if mass and mass > 0 then obj:applyForceVectorTime(cid, h.d * (mass * shoveAccel), step) end
+    local shoveAccel = SHOVE_DV * h.s * h.shove / HIT_TIME
+    if shoveAccel > 0 then
+      for cid = 0, nodeCount - 1 do
+        local mass = obj:getNodeMass(cid)
+        if mass and mass > 0 then obj:applyForceVectorTime(cid, h.d * (mass * shoveAccel), step) end
+      end
     end
     if h.wsum > 0 then
       local total = DENT_IMPULSE * h.s / HIT_TIME
