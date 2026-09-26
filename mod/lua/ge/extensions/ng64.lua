@@ -384,8 +384,21 @@ local function groundPlane()
   return groundPlaneZ
 end
 
+-- Whether the level has a terrain at all, checked once per level. On a level without one (a map built entirely from
+-- meshes, like an SM64 castle grounds port) every getTerrainHeight call still costs ~0.16 ms and returns nothing:
+-- 700 of them a frame froze the game for ~100 ms, four frames in a row, every 5 m Mario moved.
+local terrainLevel, levelHasTerrain
+local function hasTerrain()
+  local level = getMissionFilename and getMissionFilename() or ""
+  if terrainLevel ~= level then
+    terrainLevel = level
+    levelHasTerrain = #(scenetree.findClassObjects("TerrainBlock") or {}) > 0
+  end
+  return levelHasTerrain
+end
+
 local function sampleHeight(x, y, refZ)
-  local h = core_terrain and core_terrain.getTerrainHeight and core_terrain.getTerrainHeight(vec3(x, y, refZ))
+  local h = hasTerrain() and core_terrain and core_terrain.getTerrainHeight and core_terrain.getTerrainHeight(vec3(x, y, refZ))
   if not h or h ~= h or h < -1e5 or h > 1e5 then
     return groundPlane() or 0 / 0
   end
