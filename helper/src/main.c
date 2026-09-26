@@ -1652,6 +1652,9 @@ int main(int argc, char **argv)
     uint8_t pkt[65536];
 
     for (;;) {
+        LARGE_INTEGER drain0, drain1;
+        int drainCount = 0, drainTypes[128] = { 0 };
+        QueryPerformanceCounter(&drain0);
         for (;;) {
             struct sockaddr_in from;
             int fromLen = sizeof(from);
@@ -1660,13 +1663,31 @@ int main(int argc, char **argv)
             s_client = from;
             s_haveClient = 1;
             lastPacket = GetTickCount();
+            LARGE_INTEGER p0, p1;
+            QueryPerformanceCounter(&p0);
             handle_packet(pkt, n);
+            QueryPerformanceCounter(&p1);
+            double pms = (double)(p1.QuadPart - p0.QuadPart) * 1000.0 / freq.QuadPart;
+            if (pms > 15) logf_("slow packet '%c' (%d bytes): %.1f ms", pkt[0], n, pms);
+            drainCount++;
+            drainTypes[pkt[0] & 127]++;
+        }
+        QueryPerformanceCounter(&drain1);
+        {
+            double dms = (double)(drain1.QuadPart - drain0.QuadPart) * 1000.0 / freq.QuadPart;
+            if (dms > 50) {
+                char types[256] = "";
+                for (int t = 0; t < 128; t++)
+                    if (drainTypes[t]) snprintf(types + strlen(types), sizeof(types) - strlen(types), " %c:%d", t, drainTypes[t]);
+                logf_("handling %d packets took %.0f ms (%s)", drainCount, dms, types);
+            }
         }
 
         QueryPerformanceCounter(&now);
         acc += (double)(now.QuadPart - last.QuadPart) / freq.QuadPart;
         last = now;
         if (acc < tickSec) { Sleep(1); continue; }
+        if (acc > 0.1) logf_("helper fell behind by %.0f ms", acc * 1000);
         if (acc > 0.25) acc = tickSec;
         acc -= tickSec;
 

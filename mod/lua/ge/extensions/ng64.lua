@@ -192,6 +192,8 @@ local function pairFor(pf)
   return h[1], h[2], 0
 end
 
+local poseGaps, lastPoseArrival, lastPoseTick = {}, nil, nil   -- local poses arriving late (helper stalls), tests
+
 local function addPose(key, pose)
   local pf = pendingFrames[key]
   if not pf then pf = { hist = {} } pendingFrames[key] = pf end
@@ -390,7 +392,9 @@ local function sampleHeight(x, y, refZ)
   return h
 end
 
+local gridStarts = 0
 local function startGrid(center)
+  gridStarts = gridStarts + 1
   grid = { cx = center.x, cy = center.y, refZ = center.z, i = 0, h = ffi.new("float[?]", GRID_N * GRID_N) }
 end
 
@@ -669,6 +673,8 @@ local function finishActivate(veh)
   end
 end
 
+local restoreCameraUntil = -1   -- after Mario goes, keep handing the camera back to the game for a moment
+
 local function deactivate()
   pendingActivateId = nil
   if not active then return end
@@ -676,7 +682,10 @@ local function deactivate()
   sendRaw("D")
   deleteMesh(0)
   lastLocalFrame = nil
+  lastPoseArrival = nil
   if commands.isFreeCamera() then commands.setGameCamera() end
+  -- a vehicle replace puts the previous camera mode (Mario's free camera) back after spawning: retry a while
+  restoreCameraUntil = simTime + 1.5
   if TriggerServerEvent then pcall(TriggerServerEvent, "ng64Gone", "") end
   log("I", logTag, "mario deactivated")
 end
@@ -768,6 +777,17 @@ local function handlePacket(data)
     ffi.copy(partPoses, string.sub(data, FRAME_HEADER_SIZE + 1), np * PART_POSE_SIZE)
     local pos, vel = vec3(h.pos[0], h.pos[1], h.pos[2]), vec3(h.vel[0], h.vel[1], h.vel[2])
     local tick = tonumber(h.tick)
+    if key == 0 then
+      local now = wallTime()
+      if lastPoseArrival and now - lastPoseArrival > 0.1 then
+        poseGaps[#poseGaps + 1] = { t = simTime, gap = now - lastPoseArrival, ticks = tick - (lastPoseTick or tick) }
+        if now - lastPoseArrival > 0.15 then
+          log("W", logTag, string.format("mario stalled: no pose from the helper for %.0f ms (%d ticks)", (now - lastPoseArrival) * 1000, tick - (lastPoseTick or tick)))
+        end
+        if #poseGaps > 40 then table.remove(poseGaps, 1) end
+      end
+      lastPoseArrival, lastPoseTick = now, tick
+    end
     noteTick(tick)
     local parts = {}
     for i = 0, np - 1 do
@@ -847,12 +867,41 @@ end
 -- ------------------------------------------------------------------------------------------------------------
 -- hooks
 
+-- Frame-time profile: how long each part of onUpdate took. A frame that took long (the next update's dt) is kept
+-- with the previous update's section times, so a stutter can be traced to whatever NG64 was doing (tests, tuning).
+local profT, profCur, profLast = 0, {}, {}
+local hitches = {}
+local function prof(name)
+  local now = os.clock()
+  profCur[name] = (profCur[name] or 0) + (now - profT)
+  profT = now
+end
+
 local lastMaterialCheck
+local lastUpdateWall
 local function onUpdate(dtReal, dtSim, dtRaw)
+  -- measured on the wall clock: the dt BeamNG passes in doesn't show a long stall (a 1.5 s freeze came in as ~16 ms)
+  local wallNow = wallTime()
+  local frameDt = lastUpdateWall and (wallNow - lastUpdateWall) or 0
+  lastUpdateWall = wallNow
+  if frameDt > 0.03 then
+    local rec = { t = simTime, dt = frameDt, sections = profLast, builds = meshBuilds, worldTris = meshTris, world = world.stats(), grids = gridStarts }
+    hitches[#hitches + 1] = rec
+    if #hitches > 40 then table.remove(hitches, 1) end
+    if frameDt > 0.1 then
+      local parts = {}
+      for k, v in pairs(profLast) do if v > 0.002 then parts[#parts + 1] = string.format("%s %.0f ms", k, v * 1000) end end
+      log("W", logTag, string.format("stutter: frame took %.0f ms (NG64: %s; world regions %s, part builds %d)", frameDt * 1000,
+        #parts > 0 and table.concat(parts, ", ") or "under 2 ms", tostring(meshRegionId), meshBuilds))
+    end
+  end
+  profLast, profCur = profCur, {}
+  profT = os.clock()
   local dt = dtReal or 0.016
   simTime = simTime + dt
   if not sock then return end
   pump()
+  prof("pump")
 
   if connected and simTime - lastRecvTime > 3 then
     connected = false
@@ -873,6 +922,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     checkMaterial()
   end
   for key, pf in pairs(pendingFrames) do drawMario(key, pf) end
+  prof("draw")
   for key in pairs(meshes) do
     if key ~= 0 and remoteNames[key] and simTime - remoteNames[key] > 3 then
       deleteMesh(key)
@@ -907,9 +957,12 @@ local function onUpdate(dtReal, dtSim, dtRaw)
       pendingActivateAt = simTime + 0.5
     end
   end
-  if not active then return end
+  if not active then
+    if simTime < restoreCameraUntil and commands.isFreeCamera() then commands.setGameCamera() end
+    return
+  end
   local stub = stubId and be:getObjectByID(stubId)
-  if not stub then deactivate() return end
+  if not stub or not isStub(stub) then deactivate() return end
 
   if lastLocalFrame then
     local pos = lastLocalFrame.pos
@@ -917,13 +970,19 @@ local function onUpdate(dtReal, dtSim, dtRaw)
         or math.abs(pos.z - gridCenter.z) > 4) then
       startGrid(pos)
     end
+    prof("misc")
     stepGrid(GRID_SAMPLES_PER_FRAME)
+    prof("grid")
     updateMesh(pos)
+    prof("world")
     sendVehicles(pos, dt)
+    prof("vehicles")
     checkVehicleHurt(pos, lastLocalFrame.vel, dt)
     sendMpState(dt)
     if controlled then applyCamera() end
+    prof("camera")
     followStub(stub, pos)
+    prof("stub")
   elseif connected then
     sendVehicles(nil)
   end
@@ -947,6 +1006,13 @@ end
 
 local function onVehicleSpawned(vid)
   local veh = be:getObjectByID(vid)
+  -- the vehicle spawner's "replace" swaps the vehicle but keeps its id: Mario's anchor is now an ordinary car.
+  -- Treating it as the anchor kept pulling the car onto Mario (and Mario back to it) with the camera stuck on him.
+  if active and vid == stubId and not isStub(veh) then
+    log("I", logTag, "mario's anchor was replaced by another vehicle")
+    deactivate()
+    return
+  end
   if isStub(veh) and veh:getID() == be:getPlayerVehicleID(0) then
     activate(veh)
   end
@@ -1032,6 +1098,8 @@ local function getStatus()
 end
 
 M.onUpdate = onUpdate
+M.getHitches = function() return { frames = hitches, poseGaps = poseGaps } end
+M.clearHitches = function() hitches, poseGaps = {}, {} end
 M.onVehicleSpawned = onVehicleSpawned
 M.onVehicleSwitched = onVehicleSwitched
 M.onVehicleDestroyed = onVehicleDestroyed

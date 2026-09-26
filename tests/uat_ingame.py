@@ -494,6 +494,19 @@ time.sleep(1.5)
 st = status()
 check(st.get("controlled") is True and "true" in lua("return tostring(commands.isFreeCamera())"), "switching back to Mario gives control back")
 
+# -- replacing Mario from the vehicle spawner: the new car takes over his anchor's id; Mario must go, not keep pulling
+# the car onto himself with the camera stuck on him ----------------------------------------------------------------
+lua("core_vehicles.replaceVehicle('pickup', {})")
+time.sleep(4)
+st = status()
+car = lua("local v=getPlayerVehicle(0) local p=v:getPosition() return v.JBeam..' '..p.x..' '..p.y")
+check(st.get("active") is False and st.get("meshes") == 0, "replacing Mario with another vehicle removes Mario (active %s, meshes %s)" % (st.get("active"), st.get("meshes")))
+check("true" in lua("return tostring(not commands.isFreeCamera())"), "the camera follows the replacement vehicle")
+time.sleep(2.5)
+car2 = lua("local v=getPlayerVehicle(0) local p=v:getPosition() return v.JBeam..' '..p.x..' '..p.y")
+c1, c2 = [float(x) for x in car.split()[1:]], [float(x) for x in car2.split()[1:]]
+check(car.startswith("pickup") and abs(c1[0] - c2[0]) + abs(c1[1] - c2[1]) < 0.5, "the replacement vehicle is left alone (%s -> %s)" % (car, car2))
+
 # -- another level with Mario as the current vehicle: he must come back textured and on the ground ------------------
 lua("core_vehicles.replaceVehicle('ng64_mario', {config='vehicles/ng64_mario/mario.pc'})")
 time.sleep(4)
