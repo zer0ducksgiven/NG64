@@ -7,9 +7,10 @@ local M = {}
 local logTag = "ng64"
 
 local ffi = require("ffi")
+local world = require("ge/extensions/ng64World")
 
 local HELPER_HOST, HELPER_PORT = "127.0.0.1", 47064
-local PROTO_VERSION = 5
+local PROTO_VERSION = 6
 local STUB_MODEL = "ng64_mario"
 
 local GRID_N, GRID_SP = 49, 0.5         -- terrain sample grid around Mario (24 m square)
@@ -344,22 +345,29 @@ end
 local down = vec3(0, 0, -1)
 local up = vec3(0, 0, 1)
 
-local function sampleHeight(x, y, refZ)
-  -- top-down from well above Mario; if that lands on an overhang above him (bridge, tunnel roof) use the lower ground
-  local topStart = vec3(x, y, refZ + 25)
-  local d = castRayStatic(topStart, down, 80)
-  if d >= 80 then return 0 / 0 end
-  local top = topStart.z - d
-  if top > refZ + 2.5 then
-    local lowStart = vec3(x, y, refZ + 1.0)
-    local d2 = castRayStatic(lowStart, down, 60)
-    if d2 < 60 then
-      local low = lowStart.z - d2
-      local ceil = castRayStatic(vec3(x, y, low + 0.1), up, 40)
-      if ceil < 40 and ceil > 1.8 then return low end
+-- Terrain only: the map's objects (buildings, ramps, walls, rocks...) come in as their real collision triangles
+-- (ng64World). Sampling them from above is what made Mario clip: raycasts can't see walls, overhangs or anything
+-- with more than one level. Terrain is a heightfield, which a grid of samples does capture.
+-- Levels without terrain (smallgrid) stand on a GroundPlane instead: an endless flat plane at its own height.
+local groundPlaneZ, groundPlaneLevel
+local function groundPlane()
+  local level = getMissionFilename and getMissionFilename() or ""
+  if groundPlaneLevel ~= level then
+    groundPlaneLevel, groundPlaneZ = level, nil
+    for _, n in ipairs(scenetree.findClassObjects("GroundPlane") or {}) do
+      local o = scenetree.findObject(n)
+      if o then groundPlaneZ = math.max(groundPlaneZ or -math.huge, o:getPosition().z) end
     end
   end
-  return top
+  return groundPlaneZ
+end
+
+local function sampleHeight(x, y, refZ)
+  local h = core_terrain and core_terrain.getTerrainHeight and core_terrain.getTerrainHeight(vec3(x, y, refZ))
+  if not h or h ~= h or h < -1e5 or h > 1e5 then
+    return groundPlane() or 0 / 0
+  end
+  return h
 end
 
 local function startGrid(center)
@@ -552,8 +560,7 @@ local function groundUnder(p)
   local hits = 0
   for i = -2, 2 do
     for j = -2, 2 do
-      local h = sampleHeight(p.x + i * 2, p.y + j * 2, p.z)
-      if h == h then hits = hits + 1 end   -- not NaN
+      if castRayStatic(vec3(p.x + i * 2, p.y + j * 2, p.z + 3), down, 60) < 60 then hits = hits + 1 end
     end
   end
   return hits >= 5
@@ -566,8 +573,68 @@ local function activate(veh)
   pendingActivateId, pendingActivateAt, waitingLogged = stubId, simTime, false
 end
 
+-- the map's objects around Mario: re-sent whenever he's moved this far from the last region's centre
+local MESH_RADIUS, MESH_HEIGHT, MESH_REFRESH = 32, 25, 8
+local MESH_TRIS_PER_PACKET = 200            -- 200 * 36 bytes stays under LuaSocket's 8 KB datagrams
+local meshCenter, meshRegionId, meshWanted, meshTris, meshLevel = nil, 0, nil, 0, nil
+
+local function sendMesh(tris)
+  meshRegionId = meshRegionId + 1
+  local nTris = #tris / 9
+  local chunks = math.max(1, math.ceil(nTris / MESH_TRIS_PER_PACKET))
+  local buf = ffi.new("float[?]", MESH_TRIS_PER_PACKET * 9)
+  for c = 0, chunks - 1 do
+    local first = c * MESH_TRIS_PER_PACKET
+    local count = math.min(MESH_TRIS_PER_PACKET, nTris - first)
+    for i = 0, count * 9 - 1 do buf[i] = tris[first * 9 + i + 1] end
+    sendRaw("O" .. packU32(meshRegionId) .. packU16(c) .. packU16(chunks) .. packU16(count) .. ffi.string(buf, count * 36))
+  end
+  meshTris = nTris
+end
+
+-- Send the region around p with every shape that's parsed so far; if some are still being parsed, send it again
+-- (updateMesh) each time more of them are ready. Blocking (spawn, teleport) gives parsing a few seconds first.
+local meshPending = 0
+
+local function requestMesh(p, blocking)
+  local level = getMissionFilename and getMissionFilename() or ""
+  if meshLevel ~= level then
+    meshLevel = level
+    local t0 = os.clock()
+    local n = world.index()
+    log("I", logTag, string.format("indexed %d colliding map objects in %.2f s", n, os.clock() - t0))
+  end
+  local deadline = os.clock() + (blocking and 3 or 0)
+  local tris, pending = world.region(p.x, p.y, p.z, MESH_RADIUS, MESH_HEIGHT)
+  while pending > 0 and os.clock() < deadline do
+    world.step(0.25)
+    tris, pending = world.region(p.x, p.y, p.z, MESH_RADIUS, MESH_HEIGHT)
+  end
+  sendMesh(tris)
+  meshCenter, meshPending = vec3(p.x, p.y, p.z), pending
+  meshWanted = pending > 0 and meshCenter or nil
+end
+
+local PREFETCH_RADIUS, prefetchAt = 120, 0
+
+local function updateMesh(pos)
+  if simTime >= prefetchAt then
+    prefetchAt = simTime + 2
+    world.prefetch(pos.x, pos.y, PREFETCH_RADIUS)
+  end
+  local left = world.step(0.004)
+  if meshWanted and left < meshPending then
+    requestMesh(meshWanted, false)       -- more shapes finished: resend the fuller region
+  elseif not meshCenter or (vec3(pos.x, pos.y, 0) - vec3(meshCenter.x, meshCenter.y, 0)):length() > MESH_REFRESH
+      or math.abs(pos.z - meshCenter.z) > MESH_HEIGHT * 0.5 then
+    requestMesh(pos, false)
+  end
+end
+
 local function finishActivate(veh)
   local p = veh:getPosition()
+  -- the map objects around the spawn point first (blocking, once), so he has walls and floors from frame one
+  requestMesh(p, true)
   -- synchronous grid so Mario has a floor the moment he spawns
   startGrid(p)
   stepGrid(GRID_N * GRID_N)
@@ -664,6 +731,8 @@ local function onCarry(c)
   end
 end
 
+local floorReply   -- last MSG_FLOOR_REPLY (tests)
+
 local function handlePacket(data)
   local t = string.sub(data, 1, 1)
   if t == "F" then
@@ -734,6 +803,14 @@ local function handlePacket(data)
     if #data < ffi.sizeof(carryBuf) then return end
     ffi.copy(carryBuf, data, ffi.sizeof(carryBuf))
     onCarry(carryBuf)
+  elseif t == "q" then
+    -- test reply: SM64 floor heights for a floorQuery
+    local n = string.byte(data, 6) + string.byte(data, 7) * 256
+    local fb = ffi.new("float[?]", n)
+    ffi.copy(fb, string.sub(data, 8), n * 4)
+    local out = {}
+    for i = 0, n - 1 do out[i + 1] = fb[i] end
+    floorReply = out
   elseif t == "P" then
     -- keepalive reply
   elseif t == "L" then
@@ -833,6 +910,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
       startGrid(pos)
     end
     stepGrid(GRID_SAMPLES_PER_FRAME)
+    updateMesh(pos)
     sendVehicles(pos, dt)
     checkVehicleHurt(pos, lastLocalFrame.vel, dt)
     sendMpState(dt)
@@ -905,6 +983,8 @@ local function onClientEndMission()
   deactivate()
   for key in pairs(meshes) do deleteMesh(key) end
   gridCenter = nil
+  meshCenter, meshWanted, meshLevel = nil, nil, nil
+  world.reset()
 end
 
 -- UAT / console helpers
@@ -917,6 +997,7 @@ local function teleport(x, y, z, reset)
   -- collision around the destination first, so he doesn't arrive over nothing
   startGrid(vec3(x, y, z))
   stepGrid(GRID_N * GRID_N)
+  requestMesh(vec3(x, y, z), true)
   sendRaw("M" .. packF(x, y, z) .. (reset and string.char(1) or ""))
 end
 
@@ -925,7 +1006,7 @@ local function getStatus()
   return {
     connected = connected, active = active, stubId = stubId, material = materialName,
     pos = f and { f.pos.x, f.pos.y, f.pos.z }, health = f and f.health, action = f and f.action,
-    numVerts = f and f.numVerts, frameAge = f and (simTime - localFrameTime), hits = hitCount, hurts = hurtCount, hulls = hullCount, carDents = carDentCount, meshBuilds = meshBuilds, hullPieces = hullPieces, carrying = carryingId, carries = carryCount, throws = throwCount, profCreate = profCreate, profBlend = profBlend, framesStarted = framesStarted, framesCompleted = framesCompleted,
+    numVerts = f and f.numVerts, frameAge = f and (simTime - localFrameTime), hits = hitCount, hurts = hurtCount, hulls = hullCount, carDents = carDentCount, meshBuilds = meshBuilds, hullPieces = hullPieces, carrying = carryingId, carries = carryCount, throws = throwCount, worldTris = meshTris, world = world.stats(), profCreate = profCreate, profBlend = profBlend, framesStarted = framesStarted, framesCompleted = framesCompleted,
     meshes = (function() local n = 0 for _ in pairs(meshes) do n = n + 1 end return n end)(),
   }
 end
@@ -942,6 +1023,14 @@ M.onClientEndMission = onClientEndMission
 M.scriptInput = scriptInput
 M.teleport = teleport
 M.getStatus = getStatus
+-- tests: ask the helper for SM64's floor height under each {x,y,z}; the answer arrives in a later frame (getFloorReply)
+M.floorQuery = function(points)
+  floorReply = nil
+  local fb = ffi.new("float[?]", #points * 3)
+  for i, p in ipairs(points) do fb[(i - 1) * 3], fb[(i - 1) * 3 + 1], fb[(i - 1) * 3 + 2] = p[1], p[2], p[3] end
+  sendRaw("Q" .. packU32(1) .. packU16(#points) .. ffi.string(fb, #points * 12))
+end
+M.getFloorReply = function() return floorReply end
 M.startTrace = function() trace = {} traceOn = true end
 M.getTrace = function() traceOn = false local out = {} for i, r in ipairs(trace) do out[i] = table.concat(r, ' ') end return table.concat(out, string.char(10)) end
 M.onRemote = onRemote

@@ -101,10 +101,16 @@ Input is only read while the BeamNG window has focus. To stop playing as Mario, 
   box is built from collidable nodes, and the anchor deliberately has none, because it would be an invisible,
   immovable post. The anchor spawns and works; the message is cosmetic.
 
-- **Map collision is a raycast heightfield** (24 m square, 0.5 m grid) around Mario. Gentle ground is smooth.
-  Steps over 0.35 m become flat tiles with a vertical wall between them. Overhangs are handled with a heuristic,
-  so the interiors of complex buildings and multi-level structures are approximate. Anything thinner than the
-  grid (poles, fences) can be missed. There is no water.
+- **Map collision** is the map's real collision geometry: every colliding object within 32 m (buildings, ramps,
+  walls, rails, props, trees, rocks) is loaded from its shape's COLLADA collision mesh, placed exactly where
+  BeamNG has it. "Visible Mesh" objects use their visible mesh, like BeamNG's physics does. Terrain is sampled on
+  a grid (a heightfield, which sampling captures), and terrain-less levels use their ground plane. Shapes are
+  parsed once, in the background, prefetched within 120 m of Mario. A very large one (West Coast USA's island
+  backdrop is a 164 MB file) can take up to about 20 s the first time, and until then that one object has no
+  collision. There is no water. Measured with `tests/clip_probe.py` (60 s of random running, jumping, diving and
+  ground pounds in the busiest spot on the map): Mario inside a solid object dropped from 11% of samples to 0% on
+  Gridmap, and from 14% to 0.2% on West Coast USA. SM64's floor agrees with BeamNG's raycasts at 99%+ of points
+  (`tests/world_check.py`).
 - **Vehicle hulls are top-down** (the highest node per 0.35 m cell, with walls down to the underside), so Mario
   can't go under or inside a car. Attacks still aim at the car's bounding box, then dent the nodes nearest the
   hit.
@@ -136,6 +142,7 @@ Needs MSYS2 with MinGW-w64 gcc (`C:\msys64`), and libsm64's source in `libsm64-m
   walls, 1 m ledge landing and running jump, rescue from below the ground, punch hits, car roof, hull bed/cab).
 - `tests/Harness/`: runs the BeamMP server plugin in the BeamMP Server Manager project's
   `BeamMpServerLuaHarness` (`dotnet test`).
+- `tests/clip_probe.py`, `tests/world_check.py`: world collision against BeamNG's own geometry (see above).
 - `tests/uat_ingame.py`: full in-game UAT through BeamNG's built-in MCP server. Launch BeamNG with
   `-enablemcp`, have the helper running, then run the script. It saves screenshots to `tests/shots/`. The
   dive check depends on timing: SM64 only dives if Mario is past speed 28 when B lands, otherwise it's a jump

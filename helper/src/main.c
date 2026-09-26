@@ -323,6 +323,21 @@ static void heightfield_surfaces(const float *h, int nx, int ny, float ox, float
 #undef BIG
 }
 
+// The static world is two parts: terrain (a heightfield, sampled) and the map's objects (their real collision
+// triangles, streamed in by the mod). Either one changing reloads both.
+static struct SM64Surface *s_terrainSurf, *s_meshSurf;
+static int s_terrainCount, s_meshCount;
+
+static void reload_static(void)
+{
+    int total = s_terrainCount + s_meshCount;
+    struct SM64Surface *all = malloc(sizeof(struct SM64Surface) * (total ? total : 1));
+    if (s_terrainCount) memcpy(all, s_terrainSurf, sizeof(struct SM64Surface) * s_terrainCount);
+    if (s_meshCount) memcpy(all + s_terrainCount, s_meshSurf, sizeof(struct SM64Surface) * s_meshCount);
+    sm64_static_surfaces_load(all, total);
+    free(all);
+}
+
 static void load_terrain(const uint8_t *p, int len)
 {
     if (len < 14) return;
@@ -333,7 +348,57 @@ static void load_terrain(const uint8_t *p, int len)
     float half = (n - 1) * sp * 0.5f;
     s_surfCount = 0;
     heightfield_surfaces((const float *)(p + 14), n, n, cx - half, cy - half, sp, STEP_M, 0, 0);
-    sm64_static_surfaces_load(s_surfBuf, s_surfCount);
+    free(s_terrainSurf);
+    s_terrainSurf = malloc(sizeof(struct SM64Surface) * (s_surfCount ? s_surfCount : 1));
+    memcpy(s_terrainSurf, s_surfBuf, sizeof(struct SM64Surface) * s_surfCount);
+    s_terrainCount = s_surfCount;
+    reload_static();
+}
+
+// MSG_MESH: u32 region; u16 chunk; u16 chunks; u16 tris; f32 tris[tris * 9] (bng world). A region's chunks are
+// collected and swapped in together, so Mario never stands on half a region.
+static struct { uint32_t region; int chunks, got; float *tris; int n, cap; uint8_t *seen; } s_meshIn;
+
+static void load_mesh_chunk(const uint8_t *p, int len)
+{
+    if (len < 10) return;
+    uint32_t region;
+    uint16_t chunk, chunks, nt;
+    memcpy(&region, p, 4); memcpy(&chunk, p + 4, 2); memcpy(&chunks, p + 6, 2); memcpy(&nt, p + 8, 2);
+    if (chunks == 0 || chunk >= chunks || len < 10 + nt * 36) return;
+    if (s_meshIn.region != region || !s_meshIn.seen) {
+        free(s_meshIn.seen);
+        s_meshIn.region = region; s_meshIn.chunks = chunks; s_meshIn.got = 0; s_meshIn.n = 0;
+        s_meshIn.seen = calloc(chunks, 1);
+    }
+    if (s_meshIn.seen[chunk]) return;
+    s_meshIn.seen[chunk] = 1;
+    if (s_meshIn.n + nt > s_meshIn.cap) {
+        s_meshIn.cap = (s_meshIn.n + nt) * 2;
+        s_meshIn.tris = realloc(s_meshIn.tris, sizeof(float) * 9 * s_meshIn.cap);
+    }
+    memcpy(s_meshIn.tris + s_meshIn.n * 9, p + 10, nt * 36);
+    s_meshIn.n += nt;
+    if (++s_meshIn.got < s_meshIn.chunks) return;
+
+    // complete: to sm64 surfaces, facing the way the mesh says (its winding), not a guess
+    s_surfCount = 0;
+    for (int t = 0; t < s_meshIn.n; t++) {
+        const float *w = s_meshIn.tris + t * 9;
+        float a[3], b[3], c[3];
+        bng2sm(w, a); bng2sm(w + 3, b); bng2sm(w + 6, c);
+        float u[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] }, v[3] = { c[0] - b[0], c[1] - b[1], c[2] - b[2] };
+        float nrm[3] = { u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0] };
+        surf_push(a, b, c, nrm);
+    }
+    free(s_meshSurf);
+    s_meshSurf = malloc(sizeof(struct SM64Surface) * (s_surfCount ? s_surfCount : 1));
+    memcpy(s_meshSurf, s_surfBuf, sizeof(struct SM64Surface) * s_surfCount);
+    s_meshCount = s_surfCount;
+    free(s_meshIn.seen);
+    s_meshIn.seen = NULL;
+    reload_static();
+    logf_("world mesh region %u: %d triangles -> %d surfaces", region, s_meshIn.n, s_meshCount);
 }
 
 #define MAX_VEH 64
@@ -1171,6 +1236,28 @@ static void handle_packet(const uint8_t *p, int len)
         break;
     }
     case MSG_TERRAIN: load_terrain(p, len); break;
+    case MSG_MESH: load_mesh_chunk(p, len); break;
+    case MSG_FLOOR_QUERY: {
+        // tests: SM64's floor height under each point, to compare with BeamNG's own raycasts
+        if (len < 6) break;
+        uint32_t qid; uint16_t n;
+        memcpy(&qid, p, 4); memcpy(&n, p + 4, 2);
+        if (n > 1000 || len < 6 + n * 12) break;
+        static uint8_t out[1 + 4 + 2 + 1000 * 4];
+        out[0] = MSG_FLOOR_REPLY;
+        memcpy(out + 1, &qid, 4); memcpy(out + 5, &n, 2);
+        for (int i = 0; i < n; i++) {
+            float b[3], sp[3];
+            memcpy(b, p + 6 + i * 12, 12);
+            bng2sm(b, sp);
+            struct SM64SurfaceCollisionData *fl = NULL;
+            float h = sm64_surface_find_floor(sp[0], sp[1], sp[2], &fl);
+            float z = fl ? h * S : NAN;
+            memcpy(out + 7 + i * 4, &z, 4);
+        }
+        send_raw(out, 7 + n * 4);
+        break;
+    }
     case MSG_SPAWN: if (len >= 12) spawn_local((const float *)p); break;
     case MSG_DESPAWN: { Mario *m = mario_find(0); if (m) mario_delete(m); break; }
     case MSG_TELEPORT: {
@@ -1377,6 +1464,8 @@ int main(int argc, char **argv)
         acc -= tickSec;
 
         s_tick++;
+        LARGE_INTEGER tickStart;
+        QueryPerformanceCounter(&tickStart);
         Pad pad;
         read_pad(&pad);
         DWORD t = GetTickCount();
@@ -1437,6 +1526,19 @@ int main(int argc, char **argv)
                 check_attacks(m);
             }
             send_frame(m);
+        }
+        {
+            // how long simulating a tick takes (budget: 33 ms), logged every 5 s
+            static double tickMsSum, tickMsMax;
+            static int tickN;
+            LARGE_INTEGER tickEnd;
+            QueryPerformanceCounter(&tickEnd);
+            double ms = (double)(tickEnd.QuadPart - tickStart.QuadPart) * 1000.0 / freq.QuadPart;
+            tickMsSum += ms; if (ms > tickMsMax) tickMsMax = ms;
+            if (++tickN == 150) {
+                logf_("tick: %.2f ms avg, %.2f ms max (%d static surfaces)", tickMsSum / tickN, tickMsMax, s_terrainCount + s_meshCount);
+                tickMsSum = tickMsMax = 0; tickN = 0;
+            }
         }
         if (s_atlasDirty && GetTickCount() - lastPacket < 2000) {
             write_atlas();
