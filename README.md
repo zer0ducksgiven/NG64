@@ -47,6 +47,17 @@ folder as `Resources/Server/NG64/`. Every player needs the helper running.
 
 Input is only read while the BeamNG window has focus. To stop playing as Mario, switch to any other vehicle.
 
+**Wine / Proton (Linux):** run the helper in the game's own Wine prefix, or Mario has no textures (the helper writes
+his texture into the game's user folder, and a different prefix has a different `C:\`):
+
+```bash
+WINEPREFIX=~/.steam/steam/steamapps/compatdata/284160/pfx wine ng64helper.exe
+```
+
+`protontricks-launch --appid 284160 ng64helper.exe` does the same with Proton's own Wine. The game tells the helper
+when its window has focus, so the controller works there too. If it still doesn't, check that Wine sees the pad
+(`wine control joy.cpl` with the same `WINEPREFIX`) and try turning Steam Input off for BeamNG.
+
 ## What works (verified by `tests/uat_ingame.py` in the real game)
 
 - Spawns and renders textured Mario; frames arrive live at 30 Hz.

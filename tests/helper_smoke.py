@@ -15,7 +15,7 @@ def check(cond, msg):
     if not cond: fails.append(msg)
 
 try:
-    s.sendto(b"H" + struct.pack("<H", 8) + user.encode(), dst)
+    s.sendto(b"H" + struct.pack("<H", 9) + user.encode(), dst)
     d, _ = s.recvfrom(65536)
     check(d[0:1] == b"W" and d[1] == 1, "welcome ok")
     atlas = d[2:].split(b"\0")[1].decode()

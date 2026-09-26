@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define NG64_PORT          47064
-#define NG64_PROTO_VERSION 8
+#define NG64_PROTO_VERSION 9
 
 // BeamNG metres per SM64 unit (same scale sm64-san-andreas uses for GTA).
 #define NG64_SCALE 0.0085f
@@ -26,6 +26,7 @@
 #define MSG_INPUT     'I'  // scripted input for UAT: f32 stickX, stickY; u8 a, b, z; u16 frames
 #define MSG_PING      'P'
 #define MSG_CONTROL   'N'  // u8: 1 = the player controls Mario, 0 = another vehicle (Mario stays, input off)
+#define MSG_FOCUS     'Z'  // u8: 1 = the game window has focus (input is only read then). Sent on change and every second
 #define MSG_TELEPORT  'M'  // f32 x, y, z (bng); optional u8 reset (full health, freefall)
 #define MSG_PART_REQ  'B'  // u32 key; u8 part; u32 hash - the client has no geometry for this part/hash (lost or new)
 

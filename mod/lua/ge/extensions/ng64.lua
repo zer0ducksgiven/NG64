@@ -10,7 +10,7 @@ local ffi = require("ffi")
 local world = require("ge/extensions/ng64World")
 
 local HELPER_HOST, HELPER_PORT = "127.0.0.1", 47064
-local PROTO_VERSION = 8
+local PROTO_VERSION = 9
 local STUB_MODEL = "ng64_mario"
 
 local GRID_N, GRID_SP = 49, 0.5         -- terrain sample grid around Mario (24 m square)
@@ -29,18 +29,18 @@ typedef struct {
   int16_t health; uint32_t action; int16_t animId; int16_t animFrame; uint32_t flags;
   float camPos[3]; float camTarget[3];
   uint16_t numVerts; uint16_t numParts; uint32_t tick;
-} ng64v8_FrameHeader;
-typedef struct { uint32_t hash; float pos[3]; float axes[3][3]; } ng64v8_PartPose;
-typedef struct { uint8_t type; uint32_t key; uint8_t part; uint32_t hash; uint16_t nv; uint16_t ni; } ng64v8_PartHeader;
-typedef struct { int16_t p[3]; int8_t n[3]; uint16_t uv[2]; } ng64v8_PackedVert;
-typedef struct { uint8_t type; uint32_t vehId; float point[3]; float dir[3]; float strength; } ng64v8_Hit;
-typedef struct { uint8_t type; uint8_t kind; uint32_t vehId; uint8_t piece; uint8_t heavy; float point[3]; float yaw; float vel[3]; } ng64v8_Carry;
+} ng64v9_FrameHeader;
+typedef struct { uint32_t hash; float pos[3]; float axes[3][3]; } ng64v9_PartPose;
+typedef struct { uint8_t type; uint32_t key; uint8_t part; uint32_t hash; uint16_t nv; uint16_t ni; } ng64v9_PartHeader;
+typedef struct { int16_t p[3]; int8_t n[3]; uint16_t uv[2]; } ng64v9_PackedVert;
+typedef struct { uint8_t type; uint32_t vehId; float point[3]; float dir[3]; float strength; } ng64v9_Hit;
+typedef struct { uint8_t type; uint8_t kind; uint32_t vehId; uint8_t piece; uint8_t heavy; float point[3]; float yaw; float vel[3]; } ng64v9_Carry;
 #pragma pack(pop)
 ]])
-local FRAME_HEADER_SIZE = ffi.sizeof("ng64v8_FrameHeader")
-local PART_POSE_SIZE = ffi.sizeof("ng64v8_PartPose")
-local PART_HEADER_SIZE = ffi.sizeof("ng64v8_PartHeader")
-local VERT_SIZE = ffi.sizeof("ng64v8_PackedVert")
+local FRAME_HEADER_SIZE = ffi.sizeof("ng64v9_FrameHeader")
+local PART_POSE_SIZE = ffi.sizeof("ng64v9_PartPose")
+local PART_HEADER_SIZE = ffi.sizeof("ng64v9_PartHeader")
+local VERT_SIZE = ffi.sizeof("ng64v9_PackedVert")
 
 local sock
 local connected = false
@@ -128,13 +128,13 @@ end
 
 
 -- BeamNG's sandboxed ffi refuses pointer casts/arithmetic, so packets are ffi.copy'd into typed scratch buffers
-local hdrBuf = ffi.new("ng64v8_FrameHeader")
-local partHdrBuf = ffi.new("ng64v8_PartHeader")
-local hitBuf = ffi.new("ng64v8_Hit")
-local carryBuf = ffi.new("ng64v8_Carry")
-local chunkVerts = ffi.new("ng64v8_PackedVert[?]", 700)
+local hdrBuf = ffi.new("ng64v9_FrameHeader")
+local partHdrBuf = ffi.new("ng64v9_PartHeader")
+local hitBuf = ffi.new("ng64v9_Hit")
+local carryBuf = ffi.new("ng64v9_Carry")
+local chunkVerts = ffi.new("ng64v9_PackedVert[?]", 700)
 local chunkIdx = ffi.new("uint16_t[?]", 4000)
-local partPoses = ffi.new("ng64v8_PartPose[?]", 64)
+local partPoses = ffi.new("ng64v9_PartPose[?]", 64)
 
 -- Poses are timed by the helper's simulation tick (exactly 1/30 s apart), not by when they arrive: Lua only reads the
 -- socket once per rendered frame, so arrival times are lumpy, and blending by them made Mario stall every few
@@ -959,6 +959,19 @@ local function noteFrame()
   profT = os.clock()
 end
 
+-- The helper only reads the controller while the game has focus, and it can't tell for itself (under Wine/Proton it
+-- can't see the game's window): tell it on every change, and once a second in case a packet was lost.
+local focusSent, focusSentAt = nil, -10
+local function sendFocus()
+  local ok, f = pcall(Engine.isProgramFocused)
+  if not ok or f == nil then ok, f = pcall(isWindowFocused) end
+  if not ok or f == nil then f = true end   -- no way to ask: never block input
+  if f ~= focusSent or simTime - focusSentAt > 1 then
+    focusSent, focusSentAt = f, simTime
+    sendRaw("Z" .. string.char(f and 1 or 0))
+  end
+end
+
 local lastMaterialCheck
 local function onUpdate(dtReal, dtSim, dtRaw)
   noteFrame()
@@ -1010,6 +1023,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
   end
 
   sendRaw("P")
+  sendFocus()
   if pendingActivateId and simTime >= pendingActivateAt then
     local veh = be:getObjectByID(pendingActivateId)
     if not veh then

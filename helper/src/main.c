@@ -940,21 +940,17 @@ static float deadzone(SHORT v, SHORT dz)
     return 0;
 }
 
-static int beamng_focused(void)
-{
-    HWND w = GetForegroundWindow();
-    char title[256] = { 0 };
-    if (!w) return 0;
-    GetWindowTextA(w, title, sizeof(title));
-    return strstr(title, "BeamNG") != NULL;
-}
+// Whether the game window has focus, as the mod reports it (MSG_FOCUS). The helper can't reliably tell for itself:
+// under Wine/Proton it can't see the game's window at all, so looking at the foreground window's title left the
+// controller dead there.
+static int s_gameFocused = 1;
 
 static int s_ignoreFocus;
 
 static void read_pad(Pad *p)
 {
     memset(p, 0, sizeof(*p));
-    if (!s_ignoreFocus && !beamng_focused()) return;
+    if (!s_ignoreFocus && !s_gameFocused) return;
     if (s_xinputGetState) {
         for (DWORD i = 0; i < 4; i++) {
             XINPUT_STATE xs;
@@ -1628,6 +1624,12 @@ static void handle_packet(const uint8_t *p, int len)
         }
         break;
     case MSG_PING: { char pong = MSG_PING; send_raw(&pong, 1); break; }
+    case MSG_FOCUS:
+        if (len >= 1 && s_gameFocused != (p[0] != 0)) {
+            s_gameFocused = p[0] != 0;
+            logf_("game window %s", s_gameFocused ? "focused: reading the controller" : "in the background: controller ignored");
+        }
+        break;
     case MSG_PART_REQ: {
         if (len < 9) break;
         uint32_t key, hash;
