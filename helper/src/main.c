@@ -1185,6 +1185,34 @@ static void send_welcome(int ok, const char *msg)
     send_raw(buf, n);
 }
 
+// 8 MB big-endian (.z64) N64 image whose header says Super Mario 64, US region
+static int is_sm64_us(const uint8_t *rom, size_t len)
+{
+    return len == 8388608 && rom[0] == 0x80 && rom[1] == 0x37 && !memcmp(rom + 0x20, "SUPER MARIO 64", 14) && rom[0x3E] == 'E';
+}
+
+static uint8_t *load_file(const char *path, size_t *outLen);
+
+static int find_sm64_rom(const char *dir, char *out, size_t outSize)
+{
+    char pattern[MAX_PATH];
+    snprintf(pattern, sizeof(pattern), "%s\\*.z64", dir);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    int ok = 0;
+    do {
+        char path[MAX_PATH];
+        snprintf(path, sizeof(path), "%s\\%s", dir, fd.cFileName);
+        size_t len = 0;
+        uint8_t *rom = load_file(path, &len);
+        if (rom && is_sm64_us(rom, len)) { snprintf(out, outSize, "%s", path); ok = 1; }
+        free(rom);
+    } while (!ok && FindNextFileA(h, &fd));
+    FindClose(h);
+    return ok;
+}
+
 static uint8_t *load_file(const char *path, size_t *outLen)
 {
     FILE *f = fopen(path, "rb");
@@ -1394,12 +1422,20 @@ int main(int argc, char **argv)
     if (!romPath) {
         snprintf(romBuf, sizeof(romBuf), "%s\\sm64.us.z64", exeDir);
         romPath = romBuf;
+        if (GetFileAttributesA(romBuf) == INVALID_FILE_ATTRIBUTES) {
+            // no sm64.us.z64: take any .z64 next to the exe that is actually SM64 (US), whatever it's called
+            static char found[MAX_PATH];
+            if (find_sm64_rom(exeDir, found, sizeof(found))) {
+                romPath = found;
+                logf_("using ROM %s", found);
+            }
+        }
     }
     size_t romLen = 0;
     uint8_t *rom = load_file(romPath, &romLen);
     if (!rom) {
-        logf_("ERROR: could not read Super Mario 64 ROM at '%s'. Put your own US .z64 ROM there, pass --rom <path>, or write its path into rom.txt next to ng64helper.exe.", romPath);
-        MessageBoxA(NULL, "NG64 helper could not find your Super Mario 64 (US) ROM.\n\nPlace it next to ng64helper.exe as sm64.us.z64, or put its full path in rom.txt.", "NG64", MB_ICONERROR);
+        logf_("ERROR: could not read Super Mario 64 ROM at '%s'. Put your own US .z64 ROM next to ng64helper.exe (any name), pass --rom <path>, or write its path into rom.txt.", romPath);
+        MessageBoxA(NULL, "NG64 helper could not find your Super Mario 64 (US) ROM.\n\nPut your .z64 ROM next to ng64helper.exe (any file name), or put its full path in rom.txt.", "NG64", MB_ICONERROR);
         return 1;
     }
     if (romLen != 8388608 || rom[0] != 0x80 || rom[1] != 0x37) {

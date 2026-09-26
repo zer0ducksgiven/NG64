@@ -24,8 +24,9 @@ BeamNG mods can't load native code, so libsm64 runs in a small helper process ne
 ## Install
 
 1. Copy `ng64.zip` into `%LOCALAPPDATA%\BeamNG\BeamNG.drive\current\mods\`.
-2. Put `ng64helper.exe` anywhere, plus your ROM next to it as `sm64.us.z64` (or put the ROM's full path in
-   `rom.txt` next to the exe, or pass `--rom <path>`).
+2. Put `ng64helper.exe` anywhere, with your Super Mario 64 (US) `.z64` ROM in the same folder. Any file name
+   works: the helper uses the first `.z64` there whose header is SM64 (US) and skips any others. You can also put
+   the ROM's full path in `rom.txt` next to the exe, or pass `--rom <path>`.
 3. Start `ng64helper.exe`, then BeamNG. Spawn **NG64 → Mario** from the vehicle selector.
 
 **Multiplayer (BeamMP):** put `ng64.zip` in the server's `Resources/Client/` and the `beammp_server_plugin`
