@@ -43,6 +43,7 @@ folder as `Resources/Server/NG64/`. Every player needs the helper running.
 | C buttons (camera) | Right stick | Arrow keys |
 | Camera zoom | RB / LB | — |
 | Pick up / throw | Y | E |
+| Music on / off | Back (View) | M |
 
 Input is only read while the BeamNG window has focus. To stop playing as Mario, switch to any other vehicle.
 
@@ -91,6 +92,14 @@ Input is only read while the BeamNG window has focus. To stop playing as Mario, 
 - Switching to another vehicle (TAB) leaves Mario in the world, standing where he was: your controller and the game
   camera go to the vehicle, and he still collides, can be run over, and so on. Switching back to him hands control
   back. If he was carrying something, he puts it down.
+- Music: SM64's Bob-omb Battlefield theme, played by SM64's own music engine from your ROM, while you're
+  playing as Mario (on by default). Back/View or M toggles it, with a toast in game. It fades out when you
+  switch to another vehicle and comes back when you return. This uses a small libsm64 addition
+  (`helper/patches/libsm64-music.patch`), because libsm64's own stop calls only act on music started through SM64's
+  level queue.
+- Camera: it swings round behind Mario as he runs away from or across the view, but not when he runs at it.
+  There, "behind him" is 180 degrees away and flipped side to side with every wobble (the view lurched about), and
+  turning bent his stick direction so he curved. Like SM64's camera, it now holds and backs up in front of him.
 - Getting run over: SM64's own thrown knockback (the tumble from an explosion), launched along the car's travel
   and scaled by its speed. That car's collision sits out for 0.4 s so the throw always clears it (otherwise a car
   already pressed against him turned the throw into a bonk that left him on the car). Only the car's own speed toward Mario counts, so running or sliding into a parked car,

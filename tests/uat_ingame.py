@@ -362,6 +362,37 @@ c5 = centre(); st = status()
 check(st.get("carrying") is None and ((c5[0] - c4[0]) ** 2 + (c5[1] - c4[1]) ** 2) ** 0.5 < 2.5,
       "Z sets it down where he stands (moved %.1f m)" % (((c5[0] - c4[0]) ** 2 + (c5[1] - c4[1]) ** 2) ** 0.5))
 
+# -- camera: running straight at it doesn't swing it round (which bent his path and made the view lurch) -----------
+import math
+lua("ng64.scriptInput(0,0,false,false,false,30)"); time.sleep(1.5)
+lua("ng64.scriptInput(0,1,false,false,false,110)")
+cam_s = []
+t0 = time.time()
+while time.time() - t0 < 3.5:
+    stt = status()
+    cp = [float(v) for v in lua("local p = core_camera.getPosition() return string.format('%f %f', p.x, p.y)").split()]
+    cam_s.append((stt["pos"], cp)); time.sleep(0.05)
+cam_s = cam_s[10:]
+yaws = [math.atan2(c[1] - p[1], c[0] - p[0]) for p, c in cam_s]
+swing = max(abs(math.atan2(math.sin(y - yaws[0]), math.cos(y - yaws[0]))) for y in yaws)
+path = sum(math.hypot(b[0][0] - a[0][0], b[0][1] - a[0][1]) for a, b in zip(cam_s, cam_s[1:]))
+direct = math.hypot(cam_s[-1][0][0] - cam_s[0][0][0], cam_s[-1][0][1] - cam_s[0][0][1])
+check(math.degrees(swing) < 10 and direct / max(path, 1e-6) > 0.95,
+      "running at the camera: camera holds (%.0f deg) and he runs straight (%.2f)" % (math.degrees(swing), direct / max(path, 1e-6)))
+
+# -- music: plays while you're Mario; the toggle turns it off and on -----------------------------------------------
+helper_log = __file__.rsplit("/", 1)[0].replace("/f/", "F:/") + "/../helper/dist/ng64helper.log"
+def helper_says(text):
+    try:
+        return text in open(helper_log, errors="replace").read()
+    except OSError:
+        return False
+check(helper_says("music playing"), "SM64 music starts when playing as Mario")
+lua("ng64.scriptInput(0,0,false,false,false,2,1,0,false,true)"); time.sleep(0.8)
+check(status().get("lastToast") == "Music off", "music toggle turns it off (toast %s)" % status().get("lastToast"))
+lua("ng64.scriptInput(0,0,false,false,false,2,1,0,false,true)"); time.sleep(0.8)
+check(status().get("lastToast") == "Music on", "music toggle turns it back on (toast %s)" % status().get("lastToast"))
+
 # -- a wreck in two pieces: two hulls, and the gap between them is open ------------------------------------------
 fresh_car()
 cx, cy, cz, nx, ny, half, fx, fy = car_geo()
@@ -448,6 +479,8 @@ st = status()
 check(st.get("active") is True and st.get("controlled") is False and st.get("meshes", 0) >= 1,
       "switching to another vehicle leaves Mario in the world (active %s, controlled %s, meshes %s)" % (st.get("active"), st.get("controlled"), st.get("meshes")))
 check("true" in lua("return tostring(not commands.isFreeCamera())"), "game camera restored")
+time.sleep(0.5)
+check(helper_says("music stopped"), "the music stops when you switch to another vehicle")
 p_before = st["pos"]
 time.sleep(1.5)
 p_after = status()["pos"]

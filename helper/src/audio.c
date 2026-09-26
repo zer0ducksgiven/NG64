@@ -4,6 +4,7 @@
 #include <mmsystem.h>
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
 #include "libsm64.h"
 
 #define NUM_BUFS   16
@@ -32,6 +33,17 @@ static DWORD WINAPI audio_thread(LPVOID arg)
         int16_t buf[BUF_FRAMES * 2];
         uint32_t queued = queued_frames();
         uint32_t n = sm64_audio_tick(queued, 1100, buf);
+        {
+            // output level, logged every ~5 s: shows whether anything (music, sounds) is actually being played
+            static double sum;
+            static uint32_t count, ticks;
+            for (uint32_t i = 0; i < n * 4 && i < BUF_FRAMES * 2; i++) { sum += (double)buf[i] * buf[i]; count++; }
+            if (++ticks == 150) {
+                extern void ng64_audio_level(double rms);
+                ng64_audio_level(count ? sqrt(sum / count) : 0);
+                sum = 0; count = 0; ticks = 0;
+            }
+        }
         WAVEHDR *h = &s_hdr[next];
         if (queued < 6000 && (!(h->dwFlags & WHDR_PREPARED) || (h->dwFlags & WHDR_DONE))) {
             if (h->dwFlags & WHDR_PREPARED) waveOutUnprepareHeader(s_wave, h, sizeof(*h));

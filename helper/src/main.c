@@ -840,7 +840,7 @@ static void check_attacks(Mario *m)
 typedef DWORD(WINAPI *XInputGetStateFn)(DWORD, XINPUT_STATE *);
 static XInputGetStateFn s_xinputGetState;
 
-typedef struct { float lx, ly, rx, ry; int a, b, z, zoomIn, zoomOut, y; } Pad;
+typedef struct { float lx, ly, rx, ry; int a, b, z, zoomIn, zoomOut, y, music; } Pad;
 
 static float deadzone(SHORT v, SHORT dz)
 {
@@ -879,6 +879,7 @@ static void read_pad(Pad *p)
             p->zoomIn = (g->wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER) != 0;
             p->zoomOut = (g->wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER) != 0;
             p->y = (g->wButtons & XINPUT_GAMEPAD_Y) != 0;
+            p->music = (g->wButtons & XINPUT_GAMEPAD_BACK) != 0;
             break;
         }
     }
@@ -891,6 +892,7 @@ static void read_pad(Pad *p)
     if (KEY('J')) p->b = 1;
     if (KEY('K')) p->z = 1;
     if (KEY('E')) p->y = 1;
+    if (KEY('M')) p->music = 1;
     if (KEY(VK_LEFT)) p->rx = -1;
     if (KEY(VK_RIGHT)) p->rx = 1;
     if (KEY(VK_UP)) p->ry = 1;
@@ -906,7 +908,43 @@ static void read_pad(Pad *p)
 
 static struct { int active; uint32_t vehId; int piece, heavy; } s_carry;
 static int s_injectB, s_prevY, s_scriptY, s_prevZ, s_effZ;
-static int s_inputEnabled = 1;   // off while the player controls another vehicle (Mario stays, standing idle)   // s_effZ: Z as fed to SM64 this tick (pad or script)
+static int s_inputEnabled = 1;
+
+// ---- music: SM64's own, from the ROM, while you're playing as Mario (Back / M toggles) -------------------------------
+#define NG64_MUSIC_SEQ 0x03   // SEQ_LEVEL_GRASS: Bob-omb Battlefield
+static int s_audioOk, s_musicOn = 1, s_musicPlaying, s_prevMusic, s_scriptMusic;
+
+static void send_toast(const char *msg)
+{
+    char buf[128];
+    snprintf(buf, sizeof(buf), "toast:%s", msg);
+    send_log(buf);
+}
+
+void ng64_audio_level(double rms) { logf_("audio level %.0f (rms)", rms); }
+
+static void music_update(const Pad *pad)
+{
+    int press = pad->music || s_scriptMusic;
+    int edge = press && !s_prevMusic;
+    s_prevMusic = press;
+    s_scriptMusic = 0;
+    if (edge && s_inputEnabled) {
+        s_musicOn = !s_musicOn;
+        send_toast(s_musicOn ? "Music on" : "Music off");
+        logf_("music %s", s_musicOn ? "on" : "off");
+    }
+    int want = s_audioOk && s_musicOn && s_inputEnabled && mario_find(0) != NULL;
+    if (want && !s_musicPlaying) {
+        sm64_ng64_music_play(NG64_MUSIC_SEQ);
+        s_musicPlaying = 1;
+        logf_("music playing (sequence 0x%02x)", NG64_MUSIC_SEQ);
+    } else if (!want && s_musicPlaying) {
+        sm64_ng64_music_stop(30);   // one-second fade
+        s_musicPlaying = 0;
+        logf_("music stopped");
+    }
+}   // off while the player controls another vehicle (Mario stays, standing idle)   // s_effZ: Z as fed to SM64 this tick (pad or script)
 #define ACT_IDLE_NG64 0x0C400201
 
 static void send_carry(int kind, const Vehicle *v, int piece, int heavy, const float *pointB, float yaw, const float *velB)
@@ -1079,8 +1117,17 @@ static void update_camera(const Mario *m, const Pad *pad, float dt)
     if (s_camDist > 2000) s_camDist = 2000;
 
     if (fabsf(pad->rx) < 0.1f && st->forwardVelocity > 8.0f) {
+        // swing round behind him as he runs away from / across the view - but not when he runs at the camera: there
+        // "behind him" is ~180 degrees away, the shortest way round flips left/right with every wobble (the camera
+        // lurched about), and turning at all bends his camera-relative stick direction so he curves. Like SM64's
+        // camera, it fades out towards 100 degrees and just backs up in front of him.
         float behind = st->faceAngle + PI;
-        s_camYaw += angdiff(behind, s_camYaw) * fminf(1.0f, 0.9f * dt * st->forwardVelocity / 32.0f);
+        float diff = angdiff(behind, s_camYaw);
+        const float limit = 1.75f;
+        if (fabsf(diff) < limit) {
+            float fade = 1.0f - fabsf(diff) / limit;
+            s_camYaw += diff * fade * fminf(1.0f, 0.9f * dt * st->forwardVelocity / 32.0f);
+        }
     }
     s_camTarget[0] = st->position[0];
     s_camTarget[1] = st->position[1] + 100;
@@ -1412,7 +1459,8 @@ static void handle_packet(const uint8_t *p, int len)
             memcpy(&fr, p + 11, 2);
             s_script.frames = fr;
             s_script.absDir = 0;
-            if (len >= 22 && p[21]) s_scriptY = 1;   // optional trailing u8: press Y (tests)
+            if (len >= 22 && (p[21] & 1)) s_scriptY = 1;           // optional trailing u8 flags (tests): 1 = Y,
+            if (len >= 22 && (p[21] & 2)) s_scriptMusic = 1;       // 2 = music toggle
             if (len >= 21) {   // optional world direction (bng x, y) that "stick up" walks along
                 float d[3] = { 0, 0, 0 }, sd[3];
                 memcpy(d, p + 13, 8);
@@ -1497,7 +1545,10 @@ int main(int argc, char **argv)
     if (verbose) sm64_register_debug_print_function(debug_print);
     s_marioTex = malloc(4 * SM64_TEXTURE_WIDTH * SM64_TEXTURE_HEIGHT);
     sm64_global_init(rom, s_marioTex);
-    if (audio && !ng64_audio_start(rom)) logf_("audio unavailable - continuing without sound");
+    if (audio) {
+        s_audioOk = ng64_audio_start(rom);
+        if (!s_audioOk) logf_("audio unavailable - continuing without sound");
+    }
     logf_("libsm64 initialised from %s", romPath);
 
     HMODULE xi = LoadLibraryA("xinput1_4.dll");
@@ -1555,6 +1606,7 @@ int main(int argc, char **argv)
         Pad pad;
         read_pad(&pad);
         if (!s_inputEnabled) memset(&pad, 0, sizeof(pad));
+        music_update(&pad);
         DWORD t = GetTickCount();
 
         for (int i = 0; i < MAX_MARIOS; i++) {

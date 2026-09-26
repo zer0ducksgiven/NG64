@@ -735,6 +735,7 @@ local function onCarry(c)
 end
 
 local floorReply   -- last MSG_FLOOR_REPLY (tests)
+local lastToast    -- last message the helper asked to show (tests)
 
 local function handlePacket(data)
   local t = string.sub(data, 1, 1)
@@ -817,7 +818,14 @@ local function handlePacket(data)
   elseif t == "P" then
     -- keepalive reply
   elseif t == "L" then
-    log("W", logTag, "helper: " .. string.sub(data, 2, -2))
+    local msg = string.sub(data, 2, -2)
+    local toast = string.match(msg, "^toast:(.*)")
+    if toast then
+      guihooks.trigger("toastrMsg", { type = "info", title = "NG64", msg = toast })
+      lastToast = toast
+    else
+      log("W", logTag, "helper: " .. msg)
+    end
   end
 end
 
@@ -1001,8 +1009,10 @@ local function onClientEndMission()
 end
 
 -- UAT / console helpers
-local function scriptInput(stickX, stickY, a, b, z, frames, dirX, dirY, y)
-  local extra = dirX and (packF(dirX, dirY) .. (y and string.char(1) or "")) or ""
+-- flags (tests): y = press Y, music = press the music toggle
+local function scriptInput(stickX, stickY, a, b, z, frames, dirX, dirY, y, music)
+  local flags = (y and 1 or 0) + (music and 2 or 0)
+  local extra = dirX and (packF(dirX, dirY) .. (flags > 0 and string.char(flags) or "")) or ""
   sendRaw("I" .. packF(stickX or 0, stickY or 0) .. string.char(a and 1 or 0, b and 1 or 0, z and 1 or 0) .. packU16(frames or 1) .. extra)
 end
 
@@ -1019,7 +1029,7 @@ local function getStatus()
   return {
     connected = connected, active = active, controlled = controlled, stubId = stubId, material = materialName,
     pos = f and { f.pos.x, f.pos.y, f.pos.z }, health = f and f.health, action = f and f.action,
-    numVerts = f and f.numVerts, frameAge = f and (simTime - localFrameTime), hits = hitCount, hurts = hurtCount, hulls = hullCount, carDents = carDentCount, meshBuilds = meshBuilds, hullPieces = hullPieces, carrying = carryingId, carries = carryCount, throws = throwCount, worldTris = meshTris, world = world.stats(), profCreate = profCreate, profBlend = profBlend, framesStarted = framesStarted, framesCompleted = framesCompleted,
+    numVerts = f and f.numVerts, frameAge = f and (simTime - localFrameTime), hits = hitCount, hurts = hurtCount, hulls = hullCount, carDents = carDentCount, meshBuilds = meshBuilds, hullPieces = hullPieces, carrying = carryingId, carries = carryCount, throws = throwCount, worldTris = meshTris, world = world.stats(), lastToast = lastToast, profCreate = profCreate, profBlend = profBlend, framesStarted = framesStarted, framesCompleted = framesCompleted,
     meshes = (function() local n = 0 for _ in pairs(meshes) do n = n + 1 end return n end)(),
   }
 end
