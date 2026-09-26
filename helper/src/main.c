@@ -164,6 +164,11 @@ typedef struct {
     uint32_t rAction;
     int16_t rAnim, rFrame;
     DWORD lastSeen;
+    // last sent geometry per body part, kept as the ready-to-send MSG_PART packet (answers MSG_PART_REQ)
+    int partCount;
+    uint32_t partHash[NG64_MAX_PARTS];
+    uint8_t *partPkt[NG64_MAX_PARTS];
+    int partLen[NG64_MAX_PARTS];
 } Mario;
 
 static Mario s_marios[MAX_MARIOS];
@@ -201,6 +206,7 @@ static void mario_delete(Mario *m)
     if (!m->used) return;
     sm64_mario_delete(m->id);
     free(m->geo.position); free(m->geo.normal); free(m->geo.color); free(m->geo.uv);
+    for (int p = 0; p < NG64_MAX_PARTS; p++) free(m->partPkt[p]);
     m->used = 0;
 }
 
@@ -1139,112 +1145,167 @@ static void update_camera(const Mario *m, const Pad *pad, float dt)
 
 // ---------------------------------------------------------------------------------------------------------------
 
-static PackedVert s_vertBuf[SM64_GEO_MAX_TRIANGLES * 3];
 static uint32_t s_seq;
 uint32_t s_tick;   // advances once per 30 Hz simulation step
 
+// libsm64 (patched, libsm64-parts.patch): per triangle, the body part (matrix) it was drawn with and its vertices
+// before that matrix; the matrices themselves. Filled by each sm64_mario_tick, so read straight after it.
+extern int g_ng64PartCount;
+extern float g_ng64PartMtx[NG64_MAX_PARTS][4][4];
+extern unsigned char g_ng64TriPart[SM64_GEO_MAX_TRIANGLES];
+extern float g_ng64LocalPos[SM64_GEO_MAX_TRIANGLES * 9];
+extern float g_ng64LocalNrm[SM64_GEO_MAX_TRIANGLES * 9];
+
+static void pack_vert(PackedVert *out, const float *smLocal, const float *smNormal, const float *color, const float *uv)
+{
+    float b[3] = { smLocal[0] * S, -smLocal[2] * S, smLocal[1] * S };   // sm2bng, as a direction (no origin)
+    for (int k = 0; k < 3; k++) {
+        float mm = b[k] * 1000.0f;
+        if (mm > 32767) mm = 32767;
+        if (mm < -32768) mm = -32768;
+        out->p[k] = (int16_t)lroundf(mm);
+    }
+    float bn[3] = { smNormal[0], -smNormal[2], smNormal[1] };
+    float len = sqrtf(bn[0] * bn[0] + bn[1] * bn[1] + bn[2] * bn[2]);
+    if (len < 1e-6f) len = 1;
+    for (int k = 0; k < 3; k++) out->n[k] = (int8_t)lroundf(fmaxf(-1, fminf(1, bn[k] / len)) * 127);
+
+    int band = band_for_color(color);
+    float u = uv[0], v = uv[1];
+    float au, av;
+    if (u >= 1.0f && v >= 1.0f) {   // untextured triangle: solid patch
+        au = (SOLID_X0 + 8) / (float)ATLAS_W;
+        av = (band * BAND_H + BAND_H * 0.5f) / (float)ATLAS_H;
+    } else {
+        au = u * SM64_TEXTURE_WIDTH / (float)ATLAS_W;
+        av = (band * BAND_H + 0.5f + v * (BAND_H - 1)) / (float)ATLAS_H;   // inset so filtering can't bleed into the next band
+    }
+    out->uv[0] = (uint16_t)lroundf(fmaxf(0, fminf(1, au)) * 65535);
+    out->uv[1] = (uint16_t)lroundf(fmaxf(0, fminf(1, av)) * 65535);
+}
+
+static void send_part(const Mario *m, int part, uint32_t hash)
+{
+    if (part < 0 || part >= m->partCount || !m->partPkt[part] || m->partHash[part] != hash) return;
+    send_raw(m->partPkt[part], m->partLen[part]);
+}
+
+// BeamNG redraws a rebuilt ProceduralMesh at a cost that never goes away: rebuilding Mario every frame made the game
+// slower and slower (unplayable after ~30 min). SM64's Mario is rigid body parts, one matrix each, so each part's
+// geometry is sent once (in its own frame) and a frame only carries where every part is. A part's geometry changes
+// only with its look (blinking eyes, hand pose, cap), and the mod keeps every look it has seen.
 static void send_frame(Mario *m)
 {
-    FrameHeader h;
+    static uint8_t pkt[sizeof(FrameHeader) + NG64_MAX_PARTS * sizeof(PartPose)];
+    FrameHeader *h = (FrameHeader *)pkt;
+    PartPose *poses = (PartPose *)(pkt + sizeof(FrameHeader));
     const struct SM64MarioState *st = &m->state;
     float origin[3];
     if (m->key == 0) memcpy(origin, st->position, 12);
     else memcpy(origin, m->rPos, 12);
 
-    memset(&h, 0, sizeof(h));
-    h.type = MSG_FRAME;
-    h.key = m->key;
-    h.seq = ++s_seq;
-    sm2bng(origin, h.pos);
+    memset(h, 0, sizeof(*h));
+    h->type = MSG_FRAME;
+    h->key = m->key;
+    h->seq = ++s_seq;
+    sm2bng(origin, h->pos);
     float vel[3] = { st->velocity[0] * 30, st->velocity[1] * 30, st->velocity[2] * 30 };
-    sm2bng(vel, h.vel);
-    h.faceAngle = st->faceAngle;
-    h.health = st->health;
-    h.action = st->action;
-    h.animId = (int16_t)st->animID;
-    h.animFrame = st->animFrame;
-    h.flags = st->flags;
+    sm2bng(vel, h->vel);
+    h->faceAngle = st->faceAngle;
+    h->health = st->health;
+    h->action = st->action;
+    h->animId = (int16_t)st->animID;
+    h->animFrame = st->animFrame;
+    h->flags = st->flags;
     if (m->key == 0) {
-        sm2bng(s_camPos, h.camPos);
-        sm2bng(s_camTarget, h.camTarget);
+        sm2bng(s_camPos, h->camPos);
+        sm2bng(s_camTarget, h->camTarget);
     }
 
-    int nv = m->geo.numTrianglesUsed * 3;
-    PackedVert *verts = s_vertBuf;
-    for (int i = 0; i < nv; i++) {
-        float rel[3] = { m->geo.position[i * 3] - origin[0], m->geo.position[i * 3 + 1] - origin[1], m->geo.position[i * 3 + 2] - origin[2] };
-        float b[3];
-        sm2bng(rel, b);
-        for (int k = 0; k < 3; k++) {
-            float mm = b[k] * 1000.0f;
-            if (mm > 32767) mm = 32767;
-            if (mm < -32768) mm = -32768;
-            verts[i].p[k] = (int16_t)lroundf(mm);
-        }
-        const float *sn = &m->geo.normal[i * 3];
-        float bn[3] = { sn[0], -sn[2], sn[1] };
-        for (int k = 0; k < 3; k++) verts[i].n[k] = (int8_t)lroundf(fmaxf(-1, fminf(1, bn[k])) * 127);
+    int np = g_ng64PartCount;
+    if (np > NG64_MAX_PARTS) np = NG64_MAX_PARTS;
+    int ntri = m->geo.numTrianglesUsed;
 
-        int band = band_for_color(&m->geo.color[i * 3]);
-        float u = m->geo.uv[i * 2], v = m->geo.uv[i * 2 + 1];
-        float au, av;
-        if (u >= 1.0f && v >= 1.0f) {   // untextured triangle: solid patch
-            au = (SOLID_X0 + 8) / (float)ATLAS_W;
-            av = (band * BAND_H + BAND_H * 0.5f) / (float)ATLAS_H;
-        } else {
-            au = u * SM64_TEXTURE_WIDTH / (float)ATLAS_W;
-            av = (band * BAND_H + 0.5f + v * (BAND_H - 1)) / (float)ATLAS_H;   // inset so filtering can't bleed into the next band
-        }
-        verts[i].uv[0] = (uint16_t)lroundf(fmaxf(0, fminf(1, au)) * 65535);
-        verts[i].uv[1] = (uint16_t)lroundf(fmaxf(0, fminf(1, av)) * 65535);
-    }
-    // Triangle corners share most of their vertices; BeamNG's createMesh cost scales with the vertex list, so send
-    // each distinct vertex once plus a corner index list (~800 vertices instead of ~2250 copies).
-    static PackedVert uniq[SM64_GEO_MAX_TRIANGLES * 3];
+    // geometry per part, deduplicated into unique vertices + corner indices
+    static PackedVert verts[SM64_GEO_MAX_TRIANGLES * 3];
     static uint16_t idx[SM64_GEO_MAX_TRIANGLES * 3];
-    static int32_t table[8192];
-    for (int i = 0; i < 8192; i++) table[i] = -1;
-    int nu = 0;
-    uint32_t ih = 2166136261u;
-    for (int i = 0; i < nv; i++) {
-        const uint8_t *bytes = (const uint8_t *)&verts[i];
-        uint32_t hsh = 2166136261u;
-        for (size_t k = 0; k < sizeof(PackedVert); k++) hsh = (hsh ^ bytes[k]) * 16777619u;
-        uint32_t slot = hsh & 8191;
-        for (;;) {
-            if (table[slot] < 0) { table[slot] = nu; uniq[nu] = verts[i]; idx[i] = (uint16_t)nu++; break; }
-            if (!memcmp(&uniq[table[slot]], &verts[i], sizeof(PackedVert))) { idx[i] = (uint16_t)table[slot]; break; }
-            slot = (slot + 1) & 8191;
+    static int32_t table[4096];
+    static uint8_t partBuf[NG64_MAX_PART_BYTES + 64];
+    int totalVerts = 0;
+    for (int p = 0; p < np; p++) {
+        for (int i = 0; i < 4096; i++) table[i] = -1;
+        int nu = 0, ni = 0;
+        uint32_t hash = 2166136261u;
+        for (int t = 0; t < ntri; t++) {
+            if (g_ng64TriPart[t] != p) continue;
+            for (int c = 0; c < 3; c++) {
+                int corner = t * 3 + c;
+                PackedVert pv;
+                pack_vert(&pv, &g_ng64LocalPos[corner * 3], &g_ng64LocalNrm[corner * 3], &m->geo.color[corner * 3], &m->geo.uv[corner * 2]);
+                const uint8_t *bytes = (const uint8_t *)&pv;
+                uint32_t hsh = 2166136261u;
+                for (size_t k = 0; k < sizeof(PackedVert); k++) hsh = (hsh ^ bytes[k]) * 16777619u;
+                uint32_t slot = hsh & 4095;
+                int id;
+                for (;;) {
+                    if (table[slot] < 0) { table[slot] = nu; verts[nu] = pv; id = nu++; hash = (hash ^ hsh) * 16777619u; break; }
+                    if (!memcmp(&verts[table[slot]], &pv, sizeof(PackedVert))) { id = table[slot]; break; }
+                    slot = (slot + 1) & 4095;
+                }
+                idx[ni++] = (uint16_t)id;
+                hash = (hash ^ (uint32_t)id) * 16777619u;
+            }
         }
-        ih = (ih ^ (idx[i] & 0xff)) * 16777619u;
-        ih = (ih ^ (idx[i] >> 8)) * 16777619u;
-    }
-    h.numVerts = (uint16_t)nu;
-    h.numIndices = (uint16_t)nv;
-    h.indexHash = ih;
-    h.tick = s_tick;
-    send_raw(&h, sizeof(h));
+        if (ni == 0) hash = 0;
+        if (hash == 0 && ni) hash = 1;
+        totalVerts += nu;
 
-    static uint8_t chunk[8192];   // fits either 600 vertices (7800 B) or 3000 indices (6000 B)
-    ChunkHeader *c = (ChunkHeader *)chunk;
-    c->key = m->key;
-    c->seq = h.seq;
-    for (int start = 0; start < nu; start += NG64_CHUNK_VERTS) {
-        int count = nu - start < NG64_CHUNK_VERTS ? nu - start : NG64_CHUNK_VERTS;
-        c->type = MSG_CHUNK;
-        c->start = (uint16_t)start;
-        c->count = (uint16_t)count;
-        memcpy(chunk + sizeof(ChunkHeader), uniq + start, count * sizeof(PackedVert));
-        send_raw(chunk, (int)(sizeof(ChunkHeader) + count * sizeof(PackedVert)));
+        PartPose *pp = &poses[p];
+        pp->hash = hash;
+        // the part's matrix (sm64 row vectors: world = v * M) in bng terms: where the part's own bng x, y, z axes
+        // point, with its scale. Geometry is already in bng axes and metres, so only this and the position move it.
+        float (*mx)[4] = g_ng64PartMtx[p];
+        for (int k = 0; k < 3; k++) {
+            float e[3] = { 0, 0, 0 };
+            e[k] = 1;
+            float s3[3] = { e[0], e[2], -e[1] };   // bng direction -> sm64 direction
+            float w[3];
+            for (int j = 0; j < 3; j++) w[j] = s3[0] * mx[0][j] + s3[1] * mx[1][j] + s3[2] * mx[2][j];
+            pp->axes[k][0] = w[0]; pp->axes[k][1] = -w[2]; pp->axes[k][2] = w[1];
+        }
+        float t3[3] = { mx[3][0], mx[3][1], mx[3][2] };
+        sm2bng(t3, pp->pos);
+
+        if (p >= m->partCount || hash != m->partHash[p]) {
+            int len = (int)(sizeof(PartHeader) + nu * sizeof(PackedVert) + ni * 2);
+            if (len > NG64_MAX_PART_BYTES) {
+                static int warned;
+                if (!warned) { warned = 1; logf_("body part %d too big to send (%d verts, %d corners)", p, nu, ni); }
+                pp->hash = 0;
+                continue;
+            }
+            PartHeader *ph = (PartHeader *)partBuf;
+            ph->type = MSG_PART;
+            ph->key = m->key;
+            ph->part = (uint8_t)p;
+            ph->hash = hash;
+            ph->nv = (uint16_t)nu;
+            ph->ni = (uint16_t)ni;
+            memcpy(partBuf + sizeof(PartHeader), verts, nu * sizeof(PackedVert));
+            memcpy(partBuf + sizeof(PartHeader) + nu * sizeof(PackedVert), idx, ni * 2);
+            m->partPkt[p] = realloc(m->partPkt[p], len);
+            memcpy(m->partPkt[p], partBuf, len);
+            m->partLen[p] = len;
+            m->partHash[p] = hash;
+            if (hash) send_raw(partBuf, len);
+        }
     }
-    for (int start = 0; start < nv; start += NG64_CHUNK_INDICES) {
-        int count = nv - start < NG64_CHUNK_INDICES ? nv - start : NG64_CHUNK_INDICES;
-        c->type = MSG_INDEX;
-        c->start = (uint16_t)start;
-        c->count = (uint16_t)count;
-        memcpy(chunk + sizeof(ChunkHeader), idx + start, count * 2);
-        send_raw(chunk, (int)(sizeof(ChunkHeader) + count * 2));
-    }
+    m->partCount = np;
+
+    h->numVerts = (uint16_t)totalVerts;
+    h->numParts = (uint16_t)np;
+    h->tick = s_tick;
+    send_raw(pkt, (int)(sizeof(FrameHeader) + np * sizeof(PartPose)));
 }
 
 static void send_welcome(int ok, const char *msg)
@@ -1480,6 +1541,15 @@ static void handle_packet(const uint8_t *p, int len)
         }
         break;
     case MSG_PING: { char pong = MSG_PING; send_raw(&pong, 1); break; }
+    case MSG_PART_REQ: {
+        if (len < 9) break;
+        uint32_t key, hash;
+        memcpy(&key, p, 4);
+        memcpy(&hash, p + 5, 4);
+        Mario *m = mario_find(key);
+        if (m) send_part(m, p[4], hash);
+        break;
+    }
     }
 }
 

@@ -12,6 +12,7 @@ cd '$HERE/../libsm64-master'
 # changed the file's end, and re-applies with fuzz)
 grep -q 'sm64_mario_pick_up' src/libsm64.c || patch -p1 -s < '$HERE/patches/libsm64-carry.patch'
 grep -q 'sm64_ng64_music_play' src/libsm64.c || patch -p1 -s < '$HERE/patches/libsm64-music.patch'
+grep -q 'g_ng64PartCount' src/gfx_adapter.c || patch -p1 -s < '$HERE/patches/libsm64-parts.patch'
 make lib CC=gcc -j8 >/dev/null
 cd '$HERE' && mkdir -p dist
 gcc -O2 -Wall -Wno-unused-function -DGBI_FLOATS -DSM64_LIB_EXPORT -I../libsm64-master/src -o dist/ng64helper.exe \

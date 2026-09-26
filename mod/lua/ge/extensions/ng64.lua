@@ -10,7 +10,7 @@ local ffi = require("ffi")
 local world = require("ge/extensions/ng64World")
 
 local HELPER_HOST, HELPER_PORT = "127.0.0.1", 47064
-local PROTO_VERSION = 6
+local PROTO_VERSION = 7
 local STUB_MODEL = "ng64_mario"
 
 local GRID_N, GRID_SP = 49, 0.5         -- terrain sample grid around Mario (24 m square)
@@ -19,6 +19,8 @@ local GRID_SAMPLES_PER_FRAME = 700
 local VEHICLE_RANGE = 80
 local MP_SEND_INTERVAL = 1 / 15
 
+-- the struct names carry the protocol version: ffi types outlive a Lua reload, and an old definition with the same
+-- name would silently stay in place
 pcall(ffi.cdef, [[
 #pragma pack(push, 1)
 typedef struct {
@@ -26,16 +28,19 @@ typedef struct {
   float pos[3]; float vel[3]; float faceAngle;
   int16_t health; uint32_t action; int16_t animId; int16_t animFrame; uint32_t flags;
   float camPos[3]; float camTarget[3];
-  uint16_t numVerts; uint16_t numIndices; uint32_t indexHash; uint32_t tick;
-} ng64_FrameHeader;
-typedef struct { uint8_t type; uint32_t key; uint32_t seq; uint16_t start; uint16_t count; } ng64_ChunkHeader;
-typedef struct { int16_t p[3]; int8_t n[3]; uint16_t uv[2]; } ng64_PackedVert;
-typedef struct { uint8_t type; uint32_t vehId; float point[3]; float dir[3]; float strength; } ng64_Hit;
-typedef struct { uint8_t type; uint8_t kind; uint32_t vehId; uint8_t piece; uint8_t heavy; float point[3]; float yaw; float vel[3]; } ng64_Carry;
+  uint16_t numVerts; uint16_t numParts; uint32_t tick;
+} ng64v7_FrameHeader;
+typedef struct { uint32_t hash; float pos[3]; float axes[3][3]; } ng64v7_PartPose;
+typedef struct { uint8_t type; uint32_t key; uint8_t part; uint32_t hash; uint16_t nv; uint16_t ni; } ng64v7_PartHeader;
+typedef struct { int16_t p[3]; int8_t n[3]; uint16_t uv[2]; } ng64v7_PackedVert;
+typedef struct { uint8_t type; uint32_t vehId; float point[3]; float dir[3]; float strength; } ng64v7_Hit;
+typedef struct { uint8_t type; uint8_t kind; uint32_t vehId; uint8_t piece; uint8_t heavy; float point[3]; float yaw; float vel[3]; } ng64v7_Carry;
 #pragma pack(pop)
 ]])
-local CHUNK_HEADER_SIZE = ffi.sizeof("ng64_ChunkHeader")
-local VERT_SIZE = ffi.sizeof("ng64_PackedVert")
+local FRAME_HEADER_SIZE = ffi.sizeof("ng64v7_FrameHeader")
+local PART_POSE_SIZE = ffi.sizeof("ng64v7_PartPose")
+local PART_HEADER_SIZE = ffi.sizeof("ng64v7_PartHeader")
+local VERT_SIZE = ffi.sizeof("ng64v7_PackedVert")
 
 local sock
 local connected = false
@@ -54,8 +59,8 @@ local lastLocalFrame          -- decoded header fields of the latest local frame
 local localFrameTime = 0
 local prevCam, curCam         -- {pos, target, t}
 
-local meshes = {}             -- key -> { obj, lastFrame }
-local pendingFrames = {}      -- key -> frame being reassembled from chunks
+local meshes = {}             -- key -> { parts = { [part] = { looks = { [hash] = look }, shown = look } }, pos, vel }
+local pendingFrames = {}      -- key -> { hist = recent poses, cur = newest }
 local goneKeys = {}           -- remote players who left: frames still in flight for them are dropped
 local remoteNames = {}
 
@@ -65,7 +70,8 @@ local gridCenter              -- vec3 of the last sent grid
 local mpAccum = 0
 local hitCount, hurtCount, hullCount, carDentCount, meshBuilds = 0, 0, 0, 0, 0   -- for UAT
 local hullPieces = {}   -- vehicle id -> pieces in its last hull
-local profCreate, profBlend = 0, 0   -- seconds spent in createMesh / blending, for tuning
+local profCreate = 0   -- seconds spent in createMesh, for tuning
+local materialChanged = false   -- the material was recreated: meshes built with the old one must be rebuilt
 local traceOn, trace = false, {}
 local framesStarted, framesCompleted = 0, 0   -- local Mario frames begun vs fully received (dropped packets)
 local simTime = 0
@@ -113,6 +119,7 @@ local function ensureMaterial(path)
   mat:flush()
   mat:reload()
   materialName = name
+  materialChanged = true
   log("I", logTag, "mario material " .. name .. " -> " .. path)
 end
 
@@ -121,39 +128,13 @@ end
 
 
 -- BeamNG's sandboxed ffi refuses pointer casts/arithmetic, so packets are ffi.copy'd into typed scratch buffers
-local hdrBuf = ffi.new("ng64_FrameHeader")
-local chunkHdrBuf = ffi.new("ng64_ChunkHeader")
-local hitBuf = ffi.new("ng64_Hit")
-local carryBuf = ffi.new("ng64_Carry")
-local chunkVerts = ffi.new("ng64_PackedVert[?]", 600)
-
-local chunkIdx = ffi.new("uint16_t[?]", 3000)
-
-local function fillVerts(pool, start, count)
-  for i = 0, count - 1 do
-    local pv = chunkVerts[i]
-    local j = start + i + 1
-    local vt = pool.verts[j]; if not vt then vt = {}; pool.verts[j] = vt end
-    vt.x, vt.y, vt.z = pv.p[0] * 0.001, pv.p[1] * 0.001, pv.p[2] * 0.001
-    local nt = pool.normals[j]; if not nt then nt = {}; pool.normals[j] = nt end
-    nt.x, nt.y, nt.z = pv.n[0] / 127, pv.n[1] / 127, pv.n[2] / 127
-    local ut = pool.uvs[j]; if not ut then ut = {}; pool.uvs[j] = ut end
-    ut.u, ut.v = pv.uv[0] / 65535, pv.uv[1] / 65535
-  end
-end
-
-local function fillIndices(pool, start, count)
-  local idx = pool.idx
-  for i = 0, count - 1 do idx[start + i + 1] = chunkIdx[i] end
-end
-
-local function newPool() return { verts = {}, normals = {}, uvs = {}, idx = {}, faces = {} } end
-
-local function trim(t, n, upto)
-  for j = n + 1, upto do t[j] = nil end
-end
-
-local NUM_MESH_BUFFERS = 3
+local hdrBuf = ffi.new("ng64v7_FrameHeader")
+local partHdrBuf = ffi.new("ng64v7_PartHeader")
+local hitBuf = ffi.new("ng64v7_Hit")
+local carryBuf = ffi.new("ng64v7_Carry")
+local chunkVerts = ffi.new("ng64v7_PackedVert[?]", 700)
+local chunkIdx = ffi.new("uint16_t[?]", 4000)
+local partPoses = ffi.new("ng64v7_PartPose[?]", 64)
 
 -- Poses are timed by the helper's simulation tick (exactly 1/30 s apart), not by when they arrive: Lua only reads the
 -- socket once per rendered frame, so arrival times are lumpy, and blending by them made Mario stall every few
@@ -211,134 +192,171 @@ local function pairFor(pf)
   return h[1], h[2], 0
 end
 
-local function blendable(p0, p1)
-  return p0 ~= p1 and p0.ihash == p1.ihash and p0.nv == p1.nv
-end
-
-local MAX_BUILDS_PER_SECOND = 60   -- createMesh is BeamNG's cost; blending faster than this isn't visible anyway
-
--- A finished 30 Hz pose becomes "current", the old current becomes "previous", and the next one is filled into
--- whichever pool is neither. Rendering blends previous -> current, so Mario moves smoothly at the game's frame rate
--- (one sm64 frame behind, like the camera) instead of stepping at 30 Hz.
-local function completeFrame(pf)
-  local filled = pf.pools[pf.fill]
-  local nv, ni = pf.nv, pf.ni
-  trim(filled.verts, nv, filled.nv or 0)
-  trim(filled.normals, nv, filled.nv or 0)
-  trim(filled.uvs, nv, filled.nv or 0)
-  -- the face list only changes when the topology does (hash), so rebuild it only then
-  if filled.facesHash ~= pf.ihash or filled.ni ~= ni then
-    local faces, idx = filled.faces, filled.idx
-    for j = 1, ni do
-      local k = idx[j]
-      local f = faces[j]
-      if f then f.v, f.n, f.u = k, k, k else faces[j] = { v = k, n = k, u = k } end
-    end
-    trim(faces, ni, filled.ni or 0)
-    filled.facesHash = pf.ihash
-  end
-  filled.nv, filled.ni = nv, ni
-  local frame = { pool = filled, nv = nv, ihash = pf.ihash, pos = pf.pos, vel = pf.vel, t = pf.tick * TICK,
-                  camPos = pf.camPos, camTarget = pf.camTarget }
-  pf.hist = pf.hist or {}
+local function addPose(key, pose)
+  local pf = pendingFrames[key]
+  if not pf then pf = { hist = {} } pendingFrames[key] = pf end
   local h = pf.hist
-  if h[#h] and frame.t <= h[#h].t then h = {} pf.hist = h end   -- ticks went backwards: helper restarted
-  h[#h + 1] = frame
+  if h[#h] and pose.t <= h[#h].t then h = {} pf.hist = h end   -- ticks went backwards: helper restarted
+  h[#h + 1] = pose
   if #h > HISTORY then table.remove(h, 1) end
-  pf.cur = frame
-  -- fill the next pose into a pool no kept pose is using
-  local used = {}
-  for _, f in ipairs(h) do used[f.pool] = true end
-  pf.fill = nil
-  for i, p in ipairs(pf.pools) do if not used[p] then pf.fill = i break end end
-  if not pf.fill then pf.pools[#pf.pools + 1] = newPool() pf.fill = #pf.pools end
-  pf.dirty = true
+  pf.cur = pose
 end
 
--- The pose to draw this rendered frame. Returns the full vertex set when a rebuild is due (a new pose, or the blend
--- moved on and the 60/s build cap allows it); otherwise just the blended position, which is applied every frame so
--- Mario's movement through the world stays smooth even between rebuilds.
-local function blendedFrame(pf)
-  local p0, p1, a = pairFor(pf)
-  if not p0 then return nil end
-  local mix = blendable(p0, p1)
-  if not mix then
-    if a < 0.5 then p1 = p0 end   -- topology changed between them: show whichever is nearer
-    a = 1
-  end
-  local pos = mix and (p0.pos * (1 - a) + p1.pos * a) or p1.pos
-  local pairChanged = pf.lastP1 ~= p1 or pf.lastP0 ~= p0
-  local rebuild = pf.dirty and pairChanged or pairChanged
-    or (mix and math.abs(a - (pf.lastAlpha or -1)) > 0.02 and simTime - (pf.lastBuild or -1) >= 1 / MAX_BUILDS_PER_SECOND)
-  pf.dirty = false
-  if not rebuild then return { pos = pos } end
-  pf.lastP0, pf.lastP1, pf.lastAlpha, pf.lastBuild = p0, p1, a, simTime
-  if not mix or a >= 1 then
-    return { verts = p1.pool.verts, normals = p1.pool.normals, uvs = p1.pool.uvs, faces = p1.pool.faces, nv = p1.nv, pos = pos, vel = p1.vel }
-  end
-  local out, pp, cp, b = pf.out, p0.pool, p1.pool, 1 - a
-  for j = 1, p1.nv do
-    local vo = out.verts[j]; if not vo then vo = {}; out.verts[j] = vo end
-    local v0, v1 = pp.verts[j], cp.verts[j]
-    vo.x, vo.y, vo.z = v0.x * b + v1.x * a, v0.y * b + v1.y * a, v0.z * b + v1.z * a
-    local no = out.normals[j]; if not no then no = {}; out.normals[j] = no end
-    local n0, n1 = pp.normals[j], cp.normals[j]
-    no.x, no.y, no.z = n0.x * b + n1.x * a, n0.y * b + n1.y * a, n0.z * b + n1.z * a
-  end
-  trim(out.verts, p1.nv, out.nv or 0)
-  trim(out.normals, p1.nv, out.nv or 0)
-  out.nv = p1.nv
-  return { verts = out.verts, normals = out.normals, uvs = cp.uvs, faces = cp.faces, nv = p1.nv, pos = pos, vel = p1.vel }
+-- A part's axes (rotation * scale, bng) -> rotation and per-axis scale for setPosRot / setScale
+local function partTransform(ax, ay, az)
+  local sx, sy, sz = ax:length(), ay:length(), az:length()
+  if sy < 1e-6 or sz < 1e-6 then return quat(0, 0, 0, 1), vec3(math.max(sx, 1e-4), math.max(sy, 1e-4), math.max(sz, 1e-4)) end
+  local y, z = ay / sy, az / sz
+  local x = y:cross(z)
+  if ax:dot(x) < 0 then sx = -sx end   -- mirrored part
+  return quatFromDir(y, z), vec3(sx, sy, sz)
 end
 
--- Only ever called once per onUpdate, with the newest complete frame. createMesh leaves an object blank until the
--- next rendered frame, so each pose goes into a mesh that isn't on screen, is shown, and the previous one is only
--- hidden on the next update, once the new one has been drawn. Three meshes means the one being rebuilt is never the one still waiting to be hidden.
-local function buildMesh(key, r)
-  local nv = r.nv
-  local entry = meshes[key]
-  if not entry then
-    entry = { objs = {}, front = 1, hiding = {} }
-    for i = 1, NUM_MESH_BUFFERS do
-      local obj = createObject("ProceduralMesh")
-      obj:registerObject("ng64_mario_mesh_" .. tostring(key) .. "_" .. i)
-      obj.canSave = false
-      scenetree.MissionGroup:addObject(obj.obj)
-      obj:setHidden(true)
-      entry.objs[i] = obj
+-- Mario is drawn as his rigid body parts. Each look a part has (geometry hash) is built once into its own mesh and
+-- kept; every rendered frame only moves the parts and shows the right look. Rebuilding the whole mesh every frame
+-- (as NG64 used to) made BeamNG slower and slower the longer the game ran.
+local MAX_LOOKS_PER_PART = 8
+local frameNo = 0
+local lookSerial = 0
+local partRequests = {}   -- "key:part:hash" -> simTime last asked for
+local poseUpdates = 0     -- parts moved (tests)
+
+local function meshEntry(key)
+  local e = meshes[key]
+  if not e then e = { parts = {} } meshes[key] = e end
+  return e
+end
+
+local function deleteLook(look)
+  if look.obj then look.obj:delete() look.obj = nil end
+end
+
+local function dropLooks()
+  for _, e in pairs(meshes) do
+    for _, ps in pairs(e.parts) do
+      for _, look in pairs(ps.looks) do deleteLook(look) end
+      ps.looks, ps.shown = {}, nil
     end
-    meshes[key] = entry
   end
+end
+
+-- Loading another level deletes the material: recreate it, and rebuild whatever was drawn with the old one
+local function checkMaterial()
   if materialName and not scenetree.findObject(materialName) then ensureMaterial(atlasPath) end
-  if nv > 0 and materialName then
-    -- next mesh that is neither on screen nor waiting to be hidden
-    local back
-    for k = 1, NUM_MESH_BUFFERS - 1 do
-      local i = (entry.front + k - 1) % NUM_MESH_BUFFERS + 1
-      if not entry.hiding[i] then back = i break end
-    end
-    if not back then return end
-    local obj = entry.objs[back]
-    meshBuilds = meshBuilds + 1
-    local t0 = os.clock()
-    obj:createMesh({ { { verts = r.verts, normals = r.normals, uvs = r.uvs, faces = r.faces, material = materialName } } })
-    profCreate = profCreate + (os.clock() - t0)
-    obj:setPosition(r.pos)
-    obj:setHidden(false)
-    if entry.obj then entry.hiding[entry.front] = 2 end
-    entry.front = back
-    entry.obj = obj
+  if materialChanged then materialChanged = false dropLooks() end
+end
+
+local function requestPart(key, part, hash)
+  local id = key .. ":" .. part .. ":" .. hash
+  local last = partRequests[id]
+  if last and simTime - last < 0.25 then return end
+  partRequests[id] = simTime
+  sendRaw("B" .. packU32(key) .. string.char(part - 1) .. packU32(hash))
+end
+
+local function onPartGeometry(data)
+  if #data < PART_HEADER_SIZE then return end
+  ffi.copy(partHdrBuf, data, PART_HEADER_SIZE)
+  local key, part, hash = tonumber(partHdrBuf.key), tonumber(partHdrBuf.part) + 1, tonumber(partHdrBuf.hash)
+  local nv, ni = tonumber(partHdrBuf.nv), tonumber(partHdrBuf.ni)
+  if (key == 0 and not active) or goneKeys[key] or not materialName then return end
+  if nv > 700 or ni > 4000 or #data < PART_HEADER_SIZE + nv * VERT_SIZE + ni * 2 then return end
+  local e = meshEntry(key)
+  local ps = e.parts[part]
+  if not ps then ps = { looks = {} } e.parts[part] = ps end
+  if ps.looks[hash] then return end
+  checkMaterial()
+  ffi.copy(chunkVerts, string.sub(data, PART_HEADER_SIZE + 1), nv * VERT_SIZE)
+  ffi.copy(chunkIdx, string.sub(data, PART_HEADER_SIZE + 1 + nv * VERT_SIZE), ni * 2)
+  local verts, normals, uvs, faces = {}, {}, {}, {}
+  for i = 0, nv - 1 do
+    local pv = chunkVerts[i]
+    verts[i + 1] = { x = pv.p[0] * 0.001, y = pv.p[1] * 0.001, z = pv.p[2] * 0.001 }
+    normals[i + 1] = { x = pv.n[0] / 127, y = pv.n[1] / 127, z = pv.n[2] / 127 }
+    uvs[i + 1] = { u = pv.uv[0] / 65535, v = pv.uv[1] / 65535 }
   end
-  entry.pos = r.pos
-  entry.vel = r.vel
-  entry.frameTime = simTime
+  for i = 0, ni - 1 do local k = chunkIdx[i] faces[i + 1] = { v = k, n = k, u = k } end
+
+  lookSerial = lookSerial + 1
+  local obj = createObject("ProceduralMesh")
+  obj:registerObject("ng64_mario_" .. key .. "_" .. part .. "_" .. lookSerial)
+  obj.canSave = false
+  scenetree.MissionGroup:addObject(obj.obj)
+  obj:setHidden(true)
+  local t0 = os.clock()
+  obj:createMesh({ { { verts = verts, normals = normals, uvs = uvs, faces = faces, material = materialName } } })
+  profCreate = profCreate + (os.clock() - t0)
+  meshBuilds = meshBuilds + 1
+  ps.looks[hash] = { obj = obj, builtFrame = frameNo, used = simTime }
+
+  -- keep the looks this part uses most recently
+  local n, oldest, oldestHash = 0, math.huge, nil
+  for h, look in pairs(ps.looks) do
+    n = n + 1
+    if look ~= ps.shown and h ~= hash and look.used < oldest then oldest, oldestHash = look.used, h end
+  end
+  if n > MAX_LOOKS_PER_PART and oldestHash then deleteLook(ps.looks[oldestHash]) ps.looks[oldestHash] = nil end
+end
+
+local function nlerpQuat(a, b, t)
+  local bx, by, bz, bw = b.x, b.y, b.z, b.w
+  if a.x * bx + a.y * by + a.z * bz + a.w * bw < 0 then bx, by, bz, bw = -bx, -by, -bz, -bw end
+  local x, y, z, w = a.x + (bx - a.x) * t, a.y + (by - a.y) * t, a.z + (bz - a.z) * t, a.w + (bw - a.w) * t
+  local l = math.sqrt(x * x + y * y + z * z + w * w)
+  if l < 1e-9 then return a.x, a.y, a.z, a.w end
+  return x / l, y / l, z / l, w / l
+end
+
+-- this rendered frame's pose: blend the two poses either side of the render time, part by part
+local function drawMario(key, pf)
+  local p0, p1, a = pairFor(pf)
+  if not p0 then return end
+  local e = meshEntry(key)
+  e.pos = p0.pos + (p1.pos - p0.pos) * a
+  e.vel = p1.vel
+  local near = a < 0.5 and p0 or p1
+  for i, q1 in pairs(p1.parts) do
+    local q0 = p0.parts[i] or q1
+    local nq = near.parts[i] or q1
+    local ps = e.parts[i]
+    if not ps then ps = { looks = {} } e.parts[i] = ps end
+    local look = nq.hash ~= 0 and ps.looks[nq.hash] or nil
+    if nq.hash ~= 0 and not look then requestPart(key, i, nq.hash) end
+    -- createMesh leaves an object blank until it has been drawn once: a look built this frame waits a frame
+    if look and look.builtFrame == frameNo then look = nil end
+    local show = look or (nq.hash ~= 0 and ps.shown) or nil
+    if show ~= ps.shown then
+      if ps.shown and ps.shown.obj then ps.shown.obj:setHidden(true) end
+      ps.shown = show
+      if show then show.obj:setHidden(false) end
+    end
+    if show and show.obj then
+      show.used = simTime
+      local pos = q0.pos + (q1.pos - q0.pos) * a
+      local rx, ry, rz, rw = nlerpQuat(q0.rot, q1.rot, a)
+      show.obj:setPosRot(pos.x, pos.y, pos.z, rx, ry, rz, rw)
+      local sc = q0.scale + (q1.scale - q0.scale) * a
+      if not show.scale or (show.scale - sc):squaredLength() > 1e-8 then show.obj:setScale(sc) show.scale = sc end
+      poseUpdates = poseUpdates + 1
+    end
+  end
+  for i, ps in pairs(e.parts) do
+    if not p1.parts[i] and ps.shown then
+      if ps.shown.obj then ps.shown.obj:setHidden(true) end
+      ps.shown = nil
+    end
+  end
 end
 
 local function deleteMesh(key)
   local e = meshes[key]
-  if e then for _, o in ipairs(e.objs) do o:delete() end end
+  if e then
+    for _, ps in pairs(e.parts) do
+      for _, look in pairs(ps.looks) do deleteLook(look) end
+    end
+  end
   meshes[key] = nil
-  pendingFrames[key] = nil   -- or the next update would rebuild it from the last pose
+  pendingFrames[key] = nil
 end
 
 -- ------------------------------------------------------------------------------------------------------------
@@ -740,55 +758,42 @@ local lastToast    -- last message the helper asked to show (tests)
 local function handlePacket(data)
   local t = string.sub(data, 1, 1)
   if t == "F" then
-    if #data < ffi.sizeof(hdrBuf) then return end
-    ffi.copy(hdrBuf, data, ffi.sizeof(hdrBuf))
+    if #data < FRAME_HEADER_SIZE then return end
+    ffi.copy(hdrBuf, data, FRAME_HEADER_SIZE)
     local h = hdrBuf
     local key = tonumber(h.key)
     if (key == 0 and not active) or goneKeys[key] then return end
-    local nv = math.min(tonumber(h.numVerts), 3072)
-    local ni = math.min(tonumber(h.numIndices), 3072)
+    local np = math.min(tonumber(h.numParts), 64)
+    if #data < FRAME_HEADER_SIZE + np * PART_POSE_SIZE then return end
+    ffi.copy(partPoses, string.sub(data, FRAME_HEADER_SIZE + 1), np * PART_POSE_SIZE)
     local pos, vel = vec3(h.pos[0], h.pos[1], h.pos[2]), vec3(h.vel[0], h.vel[1], h.vel[2])
-    local pf = pendingFrames[key]
-    if not pf then pf = { pools = { newPool(), newPool(), newPool() }, fill = 1, out = newPool() }; pendingFrames[key] = pf end
-    pf.seq, pf.nv, pf.ni, pf.ihash, pf.got, pf.gotIdx, pf.pos, pf.vel = tonumber(h.seq), nv, ni, tonumber(h.indexHash), 0, 0, pos, vel
-    pf.tick = tonumber(h.tick)
-    noteTick(pf.tick)
-    if key == 0 then
-      pf.camPos = vec3(h.camPos[0], h.camPos[1], h.camPos[2])
-      pf.camTarget = vec3(h.camTarget[0], h.camTarget[1], h.camTarget[2])
+    local tick = tonumber(h.tick)
+    noteTick(tick)
+    local parts = {}
+    for i = 0, np - 1 do
+      local pp = partPoses[i]
+      local ax = pp.axes
+      local rot, scale = partTransform(vec3(ax[0][0], ax[0][1], ax[0][2]), vec3(ax[1][0], ax[1][1], ax[1][2]), vec3(ax[2][0], ax[2][1], ax[2][2]))
+      parts[i + 1] = { hash = tonumber(pp.hash), pos = vec3(pp.pos[0], pp.pos[1], pp.pos[2]), rot = rot, scale = scale }
     end
-    if key == 0 then framesStarted = framesStarted + 1 end
-    if nv == 0 then completeFrame(pf) end
+    local pose = { t = tick * TICK, pos = pos, vel = vel, parts = parts }
+    if key == 0 then
+      pose.camPos = vec3(h.camPos[0], h.camPos[1], h.camPos[2])
+      pose.camTarget = vec3(h.camTarget[0], h.camTarget[1], h.camTarget[2])
+      framesStarted = framesStarted + 1
+      framesCompleted = framesCompleted + 1
+    end
+    addPose(key, pose)
     if key == 0 then
       lastLocalFrame = {
         pos = pos, vel = vel,
         faceAngle = h.faceAngle, health = h.health, action = tonumber(h.action),
-        animId = h.animId, animFrame = h.animFrame, flags = tonumber(h.flags), numVerts = nv,
+        animId = h.animId, animFrame = h.animFrame, flags = tonumber(h.flags), numVerts = tonumber(h.numVerts),
       }
       localFrameTime = simTime
     end
-  elseif t == "G" or t == "J" then
-    if #data < CHUNK_HEADER_SIZE then return end
-    ffi.copy(chunkHdrBuf, data, CHUNK_HEADER_SIZE)
-    local key = tonumber(chunkHdrBuf.key)
-    local pf = pendingFrames[key]
-    if not pf or pf.seq ~= tonumber(chunkHdrBuf.seq) then return end
-    local start, count = tonumber(chunkHdrBuf.start), tonumber(chunkHdrBuf.count)
-    if t == "G" then
-      if count > 600 or start + count > pf.nv or #data < CHUNK_HEADER_SIZE + count * VERT_SIZE then return end
-      ffi.copy(chunkVerts, string.sub(data, CHUNK_HEADER_SIZE + 1), count * VERT_SIZE)
-      fillVerts(pf.pools[pf.fill], start, count)
-      pf.got = pf.got + count
-    else
-      if count > 3000 or start + count > pf.ni or #data < CHUNK_HEADER_SIZE + count * 2 then return end
-      ffi.copy(chunkIdx, string.sub(data, CHUNK_HEADER_SIZE + 1), count * 2)
-      fillIndices(pf.pools[pf.fill], start, count)
-      pf.gotIdx = pf.gotIdx + count
-    end
-    if pf.got == pf.nv and pf.gotIdx == pf.ni then
-      completeFrame(pf)
-      if key == 0 then framesCompleted = framesCompleted + 1 end
-    end
+  elseif t == "E" then
+    onPartGeometry(data)
   elseif t == "W" then
     local ok = string.byte(data, 2) == 1
     local msg, path = string.match(string.sub(data, 3), "^([^%z]*)%z([^%z]*)")
@@ -842,6 +847,7 @@ end
 -- ------------------------------------------------------------------------------------------------------------
 -- hooks
 
+local lastMaterialCheck
 local function onUpdate(dtReal, dtSim, dtRaw)
   local dt = dtReal or 0.016
   simTime = simTime + dt
@@ -860,23 +866,14 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     end
   end
 
-  -- at most one rebuild per mesh per rendered frame, always the newest complete pose
-  for key, pf in pairs(pendingFrames) do
-    local t0 = os.clock()
-    local r = blendedFrame(pf)
-    profBlend = profBlend + (os.clock() - t0)
-    if r and r.verts then
-      buildMesh(key, r)
-    elseif r and meshes[key] and meshes[key].obj then
-      meshes[key].obj:setPosition(r.pos)
-    end
+  -- draw every Mario: move his parts to this rendered frame's pose
+  frameNo = frameNo + 1
+  if materialChanged or simTime - (lastMaterialCheck or -1) > 1 then
+    lastMaterialCheck = simTime
+    checkMaterial()
   end
-
-  -- smooth the meshes between 30 Hz frames
-  for key, e in pairs(meshes) do
-    for i, left in pairs(e.hiding) do
-      if left <= 1 then e.objs[i]:setHidden(true) e.hiding[i] = nil else e.hiding[i] = left - 1 end
-    end
+  for key, pf in pairs(pendingFrames) do drawMario(key, pf) end
+  for key in pairs(meshes) do
     if key ~= 0 and remoteNames[key] and simTime - remoteNames[key] > 3 then
       deleteMesh(key)
       remoteNames[key] = nil
@@ -887,7 +884,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
   if traceOn then
     local e = meshes[0]
     local cp = commands.isFreeCamera() and core_camera.getPosition() or nil
-    local mp = e and e.obj and e.obj:getPosition()
+    local mp = e and e.pos
     local pf = pendingFrames[0]
     local _, _, al = pairFor(pf or {})
     al = al or -1
@@ -1029,7 +1026,7 @@ local function getStatus()
   return {
     connected = connected, active = active, controlled = controlled, stubId = stubId, material = materialName,
     pos = f and { f.pos.x, f.pos.y, f.pos.z }, health = f and f.health, action = f and f.action,
-    numVerts = f and f.numVerts, frameAge = f and (simTime - localFrameTime), hits = hitCount, hurts = hurtCount, hulls = hullCount, carDents = carDentCount, meshBuilds = meshBuilds, hullPieces = hullPieces, carrying = carryingId, carries = carryCount, throws = throwCount, worldTris = meshTris, world = world.stats(), lastToast = lastToast, profCreate = profCreate, profBlend = profBlend, framesStarted = framesStarted, framesCompleted = framesCompleted,
+    numVerts = f and f.numVerts, frameAge = f and (simTime - localFrameTime), hits = hitCount, hurts = hurtCount, hulls = hullCount, carDents = carDentCount, meshBuilds = meshBuilds, poseUpdates = poseUpdates, hullPieces = hullPieces, carrying = carryingId, carries = carryCount, throws = throwCount, worldTris = meshTris, world = world.stats(), lastToast = lastToast, profCreate = profCreate, framesStarted = framesStarted, framesCompleted = framesCompleted,
     meshes = (function() local n = 0 for _ in pairs(meshes) do n = n + 1 end return n end)(),
   }
 end

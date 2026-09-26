@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define NG64_PORT          47064
-#define NG64_PROTO_VERSION 6
+#define NG64_PROTO_VERSION 7
 
 // BeamNG metres per SM64 unit (same scale sm64-san-andreas uses for GTA).
 #define NG64_SCALE 0.0085f
@@ -26,12 +26,13 @@
 #define MSG_PING      'P'
 #define MSG_CONTROL   'N'  // u8: 1 = the player controls Mario, 0 = another vehicle (Mario stays, input off)
 #define MSG_TELEPORT  'M'  // f32 x, y, z (bng); optional u8 reset (full health, freefall)
+#define MSG_PART_REQ  'B'  // u32 key; u8 part; u32 hash - the client has no geometry for this part/hash (lost or new)
 
 // helper -> client
 #define MSG_WELCOME   'W'  // u8 ok; str message\0; str atlasPath\0 (game-virtual path)
-#define MSG_FRAME     'F'  // FrameHeader only; the mesh follows in MSG_CHUNK packets (LuaSocket caps UDP reads at 8 KB)
-#define MSG_CHUNK     'G'  // ChunkHeader then count * PackedVert (unique vertices)
-#define MSG_INDEX     'J'  // ChunkHeader then count * u16 (corner -> unique vertex)
+#define MSG_FRAME     'F'  // FrameHeader then numParts * PartPose. Mario is rigid body parts: the frame only moves them.
+#define MSG_PART      'E'  // PartHeader then nv * PackedVert, ni * u16: one part's geometry in its own frame. Sent when
+                           // a part's hash changes and on MSG_PART_REQ (LuaSocket caps UDP reads at 8 KB: one part fits)
 #define MSG_HIT       'A'  // u32 vehId; f32 point[3]; f32 dir[3]; f32 strength (bng)
 #define MSG_LOG       'L'  // str\0
 #define MSG_CARRY     'C'  // u8 kind (1 start, 2 hold, 3 release); u32 vehId; u8 piece; u8 heavy; f32 point[3]; f32 yaw; f32 vel[3] (bng)
@@ -40,8 +41,8 @@
 typedef struct {
     uint8_t  type;          // 'F'
     uint32_t key;           // 0 = local Mario, otherwise remote key
-    uint32_t seq;           // frame number, matches the chunks
-    float    pos[3];        // bng world, mesh origin
+    uint32_t seq;           // frame number
+    float    pos[3];        // bng world, Mario's position
     float    vel[3];        // bng m/s
     float    faceAngle;     // radians, sm64 convention
     int16_t  health;
@@ -51,25 +52,31 @@ typedef struct {
     uint32_t flags;
     float    camPos[3];     // bng, local only
     float    camTarget[3];  // bng, local only
-    uint16_t numVerts;      // unique vertices (MSG_CHUNK)
-    uint16_t numIndices;    // triangle corners (MSG_INDEX), 3 per triangle
-    uint32_t indexHash;     // FNV-1a of the index list: same hash = same topology, so frames can be blended
+    uint16_t numVerts;      // total over all parts (status/tests)
+    uint16_t numParts;      // PartPose records following this header
     uint32_t tick;          // simulation tick (30 Hz) this pose belongs to - the mod times blending by this, not arrival
 } FrameHeader;
 
 typedef struct {
-    uint8_t  type;   // 'G'
-    uint32_t key;
-    uint32_t seq;
-    uint16_t start;
-    uint16_t count;
-} ChunkHeader;
-
-#define NG64_CHUNK_VERTS 600     // 600 * 13 + 13 bytes stays under 8 KB
-#define NG64_CHUNK_INDICES 3000  // 3000 * 2 + 13 bytes
+    uint32_t hash;          // FNV-1a of the part's geometry: same hash = same mesh, 0 = part draws nothing
+    float    pos[3];        // bng world
+    float    axes[3][3];    // bng: where the part's x, y, z axes point, scaled (the part's rotation * scale)
+} PartPose;
 
 typedef struct {
-    int16_t  p[3];   // millimetres relative to FrameHeader.pos, bng axes
+    uint8_t  type;   // 'E'
+    uint32_t key;
+    uint8_t  part;
+    uint32_t hash;
+    uint16_t nv;
+    uint16_t ni;
+} PartHeader;
+
+#define NG64_MAX_PARTS 64
+#define NG64_MAX_PART_BYTES 8000   // LuaSocket's read limit is 8192
+
+typedef struct {
+    int16_t  p[3];   // millimetres in the part's own frame (bng axes)
     int8_t   n[3];   // normal * 127
     uint16_t uv[2];  // atlas uv * 65535
 } PackedVert;

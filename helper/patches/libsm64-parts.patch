@@ -1,0 +1,51 @@
+--- a/src/gfx_adapter.c
++++ b/src/gfx_adapter.c
+@@ -23,6 +23,15 @@
+ static float *s_normalPtr;
+ static float *s_uvPtr;
+ 
++// NG64: the matrix (body part) each triangle was drawn with, and its vertices before that matrix. Mario is rigid
++// parts, so drawing each part once and moving it is enough - no per-frame mesh rebuild.
++#define NG64_MAX_PARTS 64
++int g_ng64PartCount;
++float g_ng64PartMtx[NG64_MAX_PARTS][4][4];
++unsigned char g_ng64TriPart[SM64_GEO_MAX_TRIANGLES];
++float g_ng64LocalPos[SM64_GEO_MAX_TRIANGLES * 9];
++float g_ng64LocalNrm[SM64_GEO_MAX_TRIANGLES * 9];
++
+ static void mtxf_mul_vec3f_x(Mat4 mtx, Vec3f b, float w, Vec3f out)
+ {
+     out[0] = b[0] * mtx[0][0] + b[1] * mtx[1][0] + b[2] * mtx[2][0] + w * mtx[3][0];
+@@ -78,6 +87,16 @@
+                 Vec3f n1 = { ((float)nx1) / 128.0f, ((float)ny1) / 128.0f, ((float)nz1) / 128.0f };
+                 Vec3f n2 = { ((float)nx2) / 128.0f, ((float)ny2) / 128.0f, ((float)nz2) / 128.0f };
+ 
++                {
++                    int tri = (int)((s_trianglePtr - s_outBuffers->position) / 9);
++                    if( tri < SM64_GEO_MAX_TRIANGLES )
++                    {
++                        g_ng64TriPart[tri] = (unsigned char)(g_ng64PartCount > 0 ? g_ng64PartCount - 1 : 0);
++                        float *lp = &g_ng64LocalPos[tri * 9], *ln = &g_ng64LocalNrm[tri * 9];
++                        vec3f_copy( lp, p0 ); vec3f_copy( lp + 3, p1 ); vec3f_copy( lp + 6, p2 );
++                        vec3f_copy( ln, n0 ); vec3f_copy( ln + 3, n1 ); vec3f_copy( ln + 6, n2 );
++                    }
++                }
+                 mtxf_mul_vec3f_x( s_curMatrix, p0, 1.0f, s_trianglePtr );
+                 s_trianglePtr += 3;
+                 mtxf_mul_vec3f_x( s_curMatrix, p1, 1.0f, s_trianglePtr );
+@@ -199,6 +218,8 @@
+ void gSPMatrix( void *pkt, Mtx *m, uint8_t flags )
+ {
+     guMtxL2F( s_curMatrix, m );
++    if( g_ng64PartCount < NG64_MAX_PARTS )
++        memcpy( g_ng64PartMtx[g_ng64PartCount++], s_curMatrix, sizeof( s_curMatrix ) );
+ }
+ 
+ void gSPDisplayList( void *pkt, struct DisplayListNode *dl )
+@@ -214,4 +235,5 @@
+     s_normalPtr = s_outBuffers->normal;
+     s_uvPtr = s_outBuffers->uv;
+     s_outBuffers->numTrianglesUsed = 0;
++    g_ng64PartCount = 0;
+ }
+\ No newline at end of file

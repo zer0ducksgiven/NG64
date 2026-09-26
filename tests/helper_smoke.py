@@ -15,7 +15,7 @@ def check(cond, msg):
     if not cond: fails.append(msg)
 
 try:
-    s.sendto(b"H" + struct.pack("<H", 6) + user.encode(), dst)
+    s.sendto(b"H" + struct.pack("<H", 7) + user.encode(), dst)
     d, _ = s.recvfrom(65536)
     check(d[0:1] == b"W" and d[1] == 1, "welcome ok")
     atlas = d[2:].split(b"\0")[1].decode()
@@ -49,6 +49,34 @@ try:
                 h = h[:2] + h[3:]
                 out.append(h)
         return out
+
+    # body parts: each part's geometry arrives once (MSG_PART), frames only carry where the parts are
+    s.settimeout(2.0)
+    parts, nparts, end = {}, None, time.time() + 3
+    while time.time() < end and (nparts is None or len(parts) < nparts):
+        try: d, _ = s.recvfrom(65536)
+        except socket.timeout: break
+        if d[0:1] == b"E":
+            _, key, part, hsh, nv, ni = struct.unpack_from("<BIBIHH", d)
+            parts[part] = (hsh, nv, ni)
+        elif d[0:1] == b"F":
+            np_ = struct.unpack_from("<BIIfffffffhIhhIffffffHHI", d)[-2]
+            poses = [struct.unpack_from("<I", d, struct.calcsize("<BIIfffffffhIhhIffffffHHI") + i * 52)[0] for i in range(np_)]
+            nparts = sum(1 for h in poses if h)
+    check(nparts and nparts >= 10, "Mario is sent as body parts (%s with geometry)" % nparts)
+    check(len(parts) >= (nparts or 99), "every part's geometry arrived (%d of %s)" % (len(parts), nparts))
+    check(all(ni % 3 == 0 and nv > 0 for _, nv, ni in parts.values()), "part geometry is whole triangles")
+    # a lost part is sent again on request
+    if parts:
+        pid, (hsh, _, _) = next(iter(parts.items()))
+        s.sendto(b"B" + struct.pack("<IBI", 0, pid, hsh), dst)
+        got = False
+        end = time.time() + 1
+        while time.time() < end and not got:
+            try: d, _ = s.recvfrom(65536)
+            except socket.timeout: break
+            got = d[0:1] == b"E" and struct.unpack_from("<BIBI", d)[2:4] == (pid, hsh)
+        check(got, "part geometry re-sent on request")
 
     f = frames(1.5)
     check(len(f) > 20, "receiving frames (%d)" % len(f))

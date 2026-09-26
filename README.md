@@ -51,15 +51,18 @@ Input is only read while the BeamNG window has focus. To stop playing as Mario, 
 
 - Spawns and renders textured Mario; frames arrive live at 30 Hz.
 - Stands on and walks over the map (terrain and static meshes), and jumps and runs with SM64 physics.
-- No flicker: Mario's mesh is triple-buffered and rebuilt at most once per rendered frame.
+- No slowdown over long sessions: Mario is drawn as his rigid SM64 body parts (15 of them). Each part's shape is
+  built into a mesh once and kept, and every rendered frame only moves the parts. A part is only rebuilt for a look
+  it hasn't had before (blinking eyes, hand pose, cap). BeamNG never gets back the cost of drawing a rebuilt mesh,
+  so the previous version, which rebuilt the whole of Mario about 60 times a second, made the game slower and slower
+  (unplayable after about 30 minutes). `tests/soak.py` measures this.
 - Smooth motion: SM64 runs at 30 Hz, but Mario is drawn at the game's frame rate. Poses are timed by the helper's
   simulation tick (not by when they arrive, which is lumpy because Lua reads the socket once per rendered frame),
   using a high-resolution wall clock. They're kept in a short history, and Mario and the camera are both drawn a
-  fixed delay behind the newest pose, blending whichever two poses bracket that time. His position updates every
-  rendered frame, and his pose up to 60 times a second. Measured: 0 stalled frames in 330+, where the previous
-  version stalled in about 1 frame in 4. The helper sends each distinct vertex once
-  (about 540 instead of about 2250 per-corner copies). BeamNG's createMesh cost scales with that count, so Mario
-  costs about 1 ms of Lua per frame.
+  fixed delay behind the newest pose, blending each part's position, rotation and scale between whichever two
+  poses bracket that time.
+- No flicker: a newly built part waits a frame before it replaces the old one (createMesh leaves an object blank
+  until it has been drawn once).
 - Wrecks: a car's hull is split into the pieces still held together by unbroken beams, so a truck torn into cab,
   chassis and bed collides as separate pieces with open space between them. A car that's still being damaged is
   re-read every 0.3 s.

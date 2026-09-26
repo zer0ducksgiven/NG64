@@ -292,17 +292,21 @@ for i=0,2 do local a=vec3(be:getObjectOOBBHalfAxisXYZ(id,i)) local l=a:length() 
 return tostring(inside)""" % carId)
 check("false" in inside, "not left inside the car after being run over")
 
-# -- smooth motion: the mesh is rebuilt every rendered frame (blending the 30 Hz poses), not 30 times a second ----
+# -- smooth motion without rebuilding: Mario's body parts are moved every rendered frame, and their meshes are only
+# built for looks not seen before (rebuilding every frame made BeamNG slower and slower over a long session) ----
 lua("ng64.scriptInput(0.6,-1,false,false,false,120)")
-time.sleep(0.5)
-b0 = status()["meshBuilds"]
+time.sleep(1.0)
+s0 = status()
 t0 = time.time()
 time.sleep(2.0)
-b1 = status()["meshBuilds"]
-rate = (b1 - b0) / (time.time() - t0)
+s1 = status()
+dt = time.time() - t0
+moves = (s1["poseUpdates"] - s0["poseUpdates"]) / dt
+builds = (s1["meshBuilds"] - s0["meshBuilds"]) / dt
 perf = text(tool("get_performance_metrics"))
-print("  mesh builds/s %.0f; %s" % (rate, perf[:160].replace("\n", " ")))
-check(rate > 40, "Mario's mesh updates at the render rate (%.0f builds/s, 30 Hz would be 30)" % rate)
+print("  part moves/s %.0f, mesh builds/s %.1f; %s" % (moves, builds, perf[:160].replace("\n", " ")))
+check(moves > 40 * 10, "Mario's parts move at the render rate (%.0f part moves/s)" % moves)
+check(builds < 5, "running doesn't rebuild Mario's meshes (%.1f builds/s)" % builds)
 
 # -- motion: Mario moves every rendered frame, at an even speed (poses timed by simulation tick, history buffer) --
 lua("ng64.scriptInput(0,-1,false,false,false,150,1,0)")
