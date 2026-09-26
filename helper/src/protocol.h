@@ -24,6 +24,7 @@
 #define MSG_REMOTE_DEL 'X' // u32 key
 #define MSG_INPUT     'I'  // scripted input for UAT: f32 stickX, stickY; u8 a, b, z; u16 frames
 #define MSG_PING      'P'
+#define MSG_CONTROL   'N'  // u8: 1 = the player controls Mario, 0 = another vehicle (Mario stays, input off)
 #define MSG_TELEPORT  'M'  // f32 x, y, z (bng); optional u8 reset (full health, freefall)
 
 // helper -> client

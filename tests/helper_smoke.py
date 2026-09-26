@@ -134,6 +134,7 @@ try:
     s.sendto(b"M" + struct.pack("<fff", 0, 5, 13), dst)
     end = time.time() + 2
     lastz = None
+    landings = []
     while time.time() < end:
         veh()
         s.setblocking(False)
@@ -141,10 +142,13 @@ try:
             while True:
                 d, _ = s.recvfrom(65536)
                 if d[0:1] == b"F": lastz = struct.unpack_from("<BIIfff", d)[5]
+                elif d[0:1] == b"A": landings.append(struct.unpack_from("<BI3f3ff", d))
         except (BlockingIOError, socket.timeout): pass
         s.settimeout(2.0)
         time.sleep(0.01)
     check(lastz is not None and abs(lastz - 11.5) < 0.2, "standing on car roof z=%s" % lastz)
+    # that 1.5 m drop onto the roof counts as a (light) landing hit
+    check(any(h[1] == 7 and h[8] < 0.5 for h in landings), "landing on the car sends a light hit %s" % [round(h[8], 2) for h in landings])
 
     # hull: pickup-ish shape in the vehicle frame (x right, y fwd, z up): bed 0.9 m at the back, cab 1.5 m in front
     nx, ny, cell = 4, 8, 0.5

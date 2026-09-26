@@ -46,7 +46,9 @@ local materialName
 local materialSerial = 0
 local warnedNoHelper = false
 
-local active = false          -- local Mario is being played
+local active = false          -- local Mario exists
+local controlled = false      -- ...and the player is controlling him (not another vehicle)
+local setControlled           -- defined with the vehicle-switch handling below
 local stubId                  -- vehicle id of the anchor vehicle
 local lastLocalFrame          -- decoded header fields of the latest local frame
 local localFrameTime = 0
@@ -641,6 +643,7 @@ local function finishActivate(veh)
   sendVehicles(p)
   sendRaw("S" .. packF(p.x, p.y, p.z + 0.2))
   active = true
+  setControlled(true)
   prevCam, curCam = nil, nil
   log("I", logTag, string.format("mario activated at %.2f %.2f %.2f", p.x, p.y, p.z))
   if not connected then
@@ -914,7 +917,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     sendVehicles(pos, dt)
     checkVehicleHurt(pos, lastLocalFrame.vel, dt)
     sendMpState(dt)
-    applyCamera()
+    if controlled then applyCamera() end
     followStub(stub, pos)
   elseif connected then
     sendVehicles(nil)
@@ -944,12 +947,22 @@ local function onVehicleSpawned(vid)
   end
 end
 
+-- Switching to another vehicle (TAB) leaves Mario in the world, standing where he is: he just stops taking input
+-- and the camera goes back to the game's. Switching back to him hands control back.
+setControlled = function(on)
+  controlled = on
+  sendRaw("N" .. string.char(on and 1 or 0))
+  if not on and commands.isFreeCamera() then commands.setGameCamera() end
+  log("I", logTag, on and "controlling mario" or "mario left standing; controlling another vehicle")
+end
+
 local function onVehicleSwitched(oldId, newId)
   local veh = newId and be:getObjectByID(newId)
   if isStub(veh) then
-    if not active or stubId ~= newId then activate(veh) end
-  elseif active then
-    deactivate()
+    if active and stubId == newId then setControlled(true)
+    elseif not active or stubId ~= newId then activate(veh) end
+  elseif active and controlled then
+    setControlled(false)
   end
 end
 
@@ -1004,7 +1017,7 @@ end
 local function getStatus()
   local f = lastLocalFrame
   return {
-    connected = connected, active = active, stubId = stubId, material = materialName,
+    connected = connected, active = active, controlled = controlled, stubId = stubId, material = materialName,
     pos = f and { f.pos.x, f.pos.y, f.pos.z }, health = f and f.health, action = f and f.action,
     numVerts = f and f.numVerts, frameAge = f and (simTime - localFrameTime), hits = hitCount, hurts = hurtCount, hulls = hullCount, carDents = carDentCount, meshBuilds = meshBuilds, hullPieces = hullPieces, carrying = carryingId, carries = carryCount, throws = throwCount, worldTris = meshTris, world = world.stats(), profCreate = profCreate, profBlend = profBlend, framesStarted = framesStarted, framesCompleted = framesCompleted,
     meshes = (function() local n = 0 for _ in pairs(meshes) do n = n + 1 end return n end)(),

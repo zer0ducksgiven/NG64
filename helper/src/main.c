@@ -772,6 +772,31 @@ static void send_hit(const Vehicle *v, const float *smPoint, const float *smDir,
     logf_("hit vehicle %u strength %.2f", v->vehId, strength);
 }
 
+// Landing on a car from a jump or a fall dents it where he lands, harder the faster he came down (vertical speed on
+// the frame before touchdown: a hop does nothing, a big fall leaves a real dent). Ground pounds have their own hit.
+static float s_prevVy;
+static int s_prevAir;
+
+static void check_landing(Mario *m)
+{
+    const struct SM64MarioState *st = &m->state;
+    int air = (st->action & ACT_FLAG_AIR) != 0;
+    if (s_prevAir && !air && st->action != ACT_GROUND_POUND_LAND && s_prevVy < -25.0f) {
+        float strength = fminf(0.5f, (-s_prevVy - 25.0f) / 50.0f);
+        float feet[3] = { st->position[0], st->position[1] - 10, st->position[2] };
+        for (int i = 0; i < MAX_VEH; i++) {
+            Vehicle *v = &s_veh[i];
+            float closest[3];
+            if (!v->used || v->held || !point_near_box(v, feet, 20, closest)) continue;
+            float down[3] = { 0, -1, 0 };
+            send_hit(v, closest, down, strength);
+            break;
+        }
+    }
+    s_prevAir = air;
+    s_prevVy = st->velocity[1];
+}
+
 static void check_attacks(Mario *m)
 {
     const struct SM64MarioState *st = &m->state;
@@ -880,7 +905,8 @@ static void read_pad(Pad *p)
 #define CARRY_REACH_M 1.0f
 
 static struct { int active; uint32_t vehId; int piece, heavy; } s_carry;
-static int s_injectB, s_prevY, s_scriptY, s_prevZ, s_effZ;   // s_effZ: Z as fed to SM64 this tick (pad or script)
+static int s_injectB, s_prevY, s_scriptY, s_prevZ, s_effZ;
+static int s_inputEnabled = 1;   // off while the player controls another vehicle (Mario stays, standing idle)   // s_effZ: Z as fed to SM64 this tick (pad or script)
 #define ACT_IDLE_NG64 0x0C400201
 
 static void send_carry(int kind, const Vehicle *v, int piece, int heavy, const float *pointB, float yaw, const float *velB)
@@ -1330,6 +1356,22 @@ static void handle_packet(const uint8_t *p, int len)
                 sm64_set_mario_forward_velocity(m->id, -speed);
                 sm64_set_mario_velocity(m->id, -sinf(face) * speed, fminf(55.0f, fmaxf(28.0f, speed * 0.6f)), -cosf(face) * speed);
                 logf_("thrown by vehicle at %.0f units/frame", speed);
+                // the car can already be pressed against him when the hit is noticed; the throw's first step would hit
+                // it and turn into a bonk, leaving him on (or in) the car. Its collision sits out for 0.4 s so he clears it.
+                Vehicle *hitter = NULL;
+                float bestD = 1e18f;
+                for (int i = 0; i < MAX_VEH; i++) {
+                    Vehicle *v = &s_veh[i];
+                    if (!v->used || v->held) continue;
+                    float dx = v->center[0] - sp[0], dy = v->center[1] - sp[1], dz = v->center[2] - sp[2];
+                    float d = dx * dx + dy * dy + dz * dz;
+                    if (d < bestD) { bestD = d; hitter = v; }
+                }
+                if (hitter && bestD < 400.0f * 400.0f) {   // the car the hit came from (its centre is the source point)
+                    if (!hitter->collideAfterPending) vehicle_release(hitter);
+                    hitter->collideAfterPending = 1;
+                    hitter->collideAfter = s_tick + 12;
+                }
             }
         }
         break;
@@ -1379,6 +1421,14 @@ static void handle_packet(const uint8_t *p, int len)
                 s_script.lookX = sd[0];
                 s_script.lookZ = sd[2];
             }
+        }
+        break;
+    case MSG_CONTROL:
+        if (len >= 1) {
+            s_inputEnabled = p[0] != 0;
+            Mario *m = mario_find(0);
+            if (!s_inputEnabled && m && s_carry.active) sm64_mario_drop_held(m->id);   // he puts it down when you leave
+            logf_("player %s mario", s_inputEnabled ? "controls" : "left");
         }
         break;
     case MSG_PING: { char pong = MSG_PING; send_raw(&pong, 1); break; }
@@ -1504,6 +1554,7 @@ int main(int argc, char **argv)
         QueryPerformanceCounter(&tickStart);
         Pad pad;
         read_pad(&pad);
+        if (!s_inputEnabled) memset(&pad, 0, sizeof(pad));
         DWORD t = GetTickCount();
 
         for (int i = 0; i < MAX_MARIOS; i++) {
@@ -1560,6 +1611,7 @@ int main(int argc, char **argv)
                 update_camera(m, &pad, (float)tickSec);
                 carry_update(m, &pad);
                 check_attacks(m);
+                check_landing(m);
             }
             send_frame(m);
         }

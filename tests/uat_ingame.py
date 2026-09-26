@@ -433,17 +433,40 @@ check(status().get("meshes") == 1, "remote Mario removed when the player leaves"
 lua("TriggerServerEvent = nil")
 
 # -- despawn ----------------------------------------------------------------------------------------------------------
+# landing on a car from a height dents it a little
+fresh_car()
+cx, cy, cz, nx, ny, half, fx, fy = car_geo()
+d0 = damage()
+lua("ng64.teleport(%f,%f,%f)" % (cx + fx * 0.1, cy + fy * 0.1, cz + 4.5))
+time.sleep(2.5)
+check(damage() > d0 and status().get("hits", 0) > 0, "landing on a car from a height dents it (damage %.0f -> %.0f)" % (d0, damage()))
+
+# switching to another vehicle: Mario stays in the world, standing; the game camera and controls go to the car
 lua("be:enterVehicle(0, _ng64uatCar)")
-time.sleep(1)
+time.sleep(1.5)
 st = status()
-check(st.get("active") is False, "switching to another vehicle hands control back")
+check(st.get("active") is True and st.get("controlled") is False and st.get("meshes", 0) >= 1,
+      "switching to another vehicle leaves Mario in the world (active %s, controlled %s, meshes %s)" % (st.get("active"), st.get("controlled"), st.get("meshes")))
 check("true" in lua("return tostring(not commands.isFreeCamera())"), "game camera restored")
+p_before = st["pos"]
+time.sleep(1.5)
+p_after = status()["pos"]
+check(abs(p_after[0] - p_before[0]) + abs(p_after[1] - p_before[1]) < 0.3, "he stays put while you drive (moved %.2f m)" % (abs(p_after[0] - p_before[0]) + abs(p_after[1] - p_before[1])))
+lua("be:enterVehicle(0, be:getObjectByID(ng64.getStatus().stubId))")
+time.sleep(1.5)
+st = status()
+check(st.get("controlled") is True and "true" in lua("return tostring(commands.isFreeCamera())"), "switching back to Mario gives control back")
 
 # -- another level with Mario as the current vehicle: he must come back textured and on the ground ------------------
 lua("core_vehicles.replaceVehicle('ng64_mario', {config='vehicles/ng64_mario/mario.pc'})")
 time.sleep(4)
 lua("freeroam_freeroam.startFreeroamByName('smallgrid')")
-ok = wait_for(lambda: status().get("active") is True and "smallgrid" in lua("return tostring(getMissionFilename())"), 240, 2)
+# the loader spawns the freeroam configurator's vehicle (what's picked in the game's UI), which a scripted selection
+# doesn't set - so select Mario on the new level if it brought something else
+wait_for(lambda: "smallgrid" in lua("return tostring(getMissionFilename())") and "true" in lua("return tostring(getPlayerVehicle(0) ~= nil and core_gamestate.state.state == 'freeroam')"), 240, 2)
+if "ng64_mario" not in lua("return tostring(getPlayerVehicle(0).JBeam)"):
+    lua("core_vehicles.replaceVehicle('ng64_mario', {config='vehicles/ng64_mario/mario.pc'})")
+ok = wait_for(lambda: status().get("active") is True and status().get("pos") is not None, 60, 1)
 time.sleep(3)
 mat_ok = "true" in lua("local n=ng64.getStatus().material return tostring(n ~= nil and scenetree.findObject(n) ~= nil)")
 ground = lua("local p=getPlayerVehicle(0):getPosition() return tostring(p.z - castRayStatic(p+vec3(0,0,3), vec3(0,0,-1), 50) + 3)").split()[-1]

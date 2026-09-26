@@ -86,8 +86,14 @@ Input is only read while the BeamNG window has focus. To stop playing as Mario, 
   between his hands. Other players
   don't see the carry yet (local only). libsm64 needs a small addition for this (`helper/patches/libsm64-carry.patch`,
   applied by `helper/build.sh`): SM64's carry code expects a real held object.
+- Landing on a car from a jump or a fall dents it where he lands, harder the faster he came down: a hop does
+  nothing, a 4.5 m drop onto a pickup's roof adds about 3.7k damage. Ground pounds have their own, much bigger hit.
+- Switching to another vehicle (TAB) leaves Mario in the world, standing where he was: your controller and the game
+  camera go to the vehicle, and he still collides, can be run over, and so on. Switching back to him hands control
+  back. If he was carrying something, he puts it down.
 - Getting run over: SM64's own thrown knockback (the tumble from an explosion), launched along the car's travel
-  and scaled by its speed. Only the car's own speed toward Mario counts, so running or sliding into a parked car,
+  and scaled by its speed. That car's collision sits out for 0.4 s so the throw always clears it (otherwise a car
+  already pressed against him turned the throw into a bonk that left him on the car). Only the car's own speed toward Mario counts, so running or sliding into a parked car,
   or a car he just punched away, doesn't hurt him. The hull is re-read every 2 s and right after a hit, so dents change the
   shape. Mario rides moving cars.
 - Ledges: he lands on and jumps onto the top of height steps instead of bonking off them. If he ever ends up
