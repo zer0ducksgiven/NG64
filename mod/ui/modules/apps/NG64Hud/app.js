@@ -1,6 +1,6 @@
 // NG64: Super Mario 64's HUD. The mod (ng64Hud.lua) sends { visible, health, wedges, lives, coins, stars, images }
-// as "NG64Hud"; this draws it the way SM64 does, on SM64's 320x240 screen scaled to the window: lives from the left
-// edge, stars from the right, coins and the power meter from the middle, the camera icon bottom right. The graphics
+// as "NG64Hud"; this draws it with SM64's glyphs, sized from BeamNG's UI scale like the game's own HUD: lives top left,
+// coins and stars top right, the power meter top centre, the camera icon bottom right. The graphics
 // are SM64's own, taken from the player's ROM by the helper into /ng64_cache/hud/ (plain text if they're missing).
 angular.module("beamng.apps").directive("ng64Hud", [
   function () {
@@ -24,9 +24,10 @@ angular.module("beamng.apps").directive("ng64Hud", [
         }
         var IMG = "/ng64_cache/hud/"
         var GLYPH_ADVANCE = 12            // SM64's HUD font: 16 px glyphs, 12 px apart
-        var TOP = 15                      // counters' top edge (SM64 HUD_TOP_Y)
-        var METER_Y = 74                  // power meter centre, from the top (SM64: 166 from the bottom)
-        var METER_HIDDEN_Y = -60          // where it slides to when Mario's at full health
+        var UNIT_REM = 0.15               // one SM64 screen unit, in BeamNG UI rem (a 16-unit glyph = 2.4 rem)
+        var MARGIN_REM = 0.75             // gap between the HUD and the screen edges
+        var COUNTER_GAP = 10              // between the coin and star counters, SM64 units
+        var METER_HIDDEN_Y = -70          // where the meter slides to when Mario's at full health
         var METER_HIDE_AFTER_MS = 1500    // full health this long, and the meter goes away (SM64: 45 frames)
 
         var state = null
@@ -69,8 +70,13 @@ angular.module("beamng.apps").directive("ng64Hud", [
           e.style.height = h * s + "px"
         }
 
-        function drawCounter(c, x, s, iconName, value, showTimes, images) {
-          place(c.box, x, TOP, s)
+        // how wide a counter is, in SM64 units: icon, "x", then the digits
+        function counterWidth(value, showTimes) {
+          return (showTimes ? 32 : 16) + String(value).length * GLYPH_ADVANCE + 4
+        }
+
+        function drawCounter(c, x, y, s, iconName, value, showTimes, images) {
+          place(c.box, x, y, s)
           c.icon.style.display = c.times.style.display = images ? "" : "none"
           c.text.style.display = images ? "none" : ""
           if (!images) {
@@ -98,21 +104,44 @@ angular.module("beamng.apps").directive("ng64Hud", [
           }
         }
 
+        // BeamNG's UI unit in pixels. --ui-rem is a calc() expression, so let the browser resolve it on an element
+        var remProbe = el("div", "")
+        remProbe.style.cssText = "position:absolute;visibility:hidden;width:var(--ui-rem,16px);height:0"
+        function uiRem() {
+          return remProbe.getBoundingClientRect().width || 16
+        }
+
         function layout() {
           raf = 0
-          // measured on the app's slot: this element itself is 0x0 while it's hidden
-          var box = root.parentElement || root
-          var w = box.clientWidth, h = box.clientHeight
+          // Laid out against BeamNG's app overlay (the whole screen less its safe margin, the same edges the game's
+          // own HUD keeps to), not this app's own box, which the layout system insets
+          var frame = root.closest(".overlay__frame") || document.documentElement
+          var fr = frame.getBoundingClientRect()
+          var w = fr.width, h = fr.height
           if (!state || !state.visible || !w || !h) { root.style.display = "none"; return }
           root.style.display = ""
-          var s = h / 240                   // SM64 screen units -> pixels
+          // "fixed" is relative to a transformed ancestor here, not the window: find where 0,0 lands and correct for it
+          root.style.position = "fixed"
+          root.style.left = root.style.top = "0px"
+          var origin = root.getBoundingClientRect()
+          root.style.left = fr.left - origin.left + "px"
+          root.style.top = fr.top - origin.top + "px"
+          root.style.width = w + "px"
+          root.style.height = h + "px"
+          // Sized like BeamNG's own HUD: from its UI unit (--ui-rem: 16 px x the UI scale setting), not the window,
+          // and each element tucked into its corner / edge of the screen
+          var rem = uiRem()
+          var s = rem * UNIT_REM            // SM64 screen units -> pixels
+          var m = MARGIN_REM * rem / s      // margin from the screen edges, in SM64 units
           var cx = w / s / 2                // screen centre, in SM64 units
-          var right = w / s
+          var right = w / s, bottom = h / s
           var images = !!state.images
 
-          drawCounter(lives, 22, s, "mario", state.lives, true, images)
-          drawCounter(coins, cx + 8, s, "coin", state.coins, true, images)
-          drawCounter(stars, right - 78, s, "star", state.stars, state.stars < 100, images)
+          var starsTimes = state.stars < 100
+          var starsX = right - m - counterWidth(state.stars, starsTimes)
+          drawCounter(lives, m, m, s, "mario", state.lives, true, images)
+          drawCounter(stars, starsX, m, s, "star", state.stars, starsTimes, images)
+          drawCounter(coins, starsX - COUNTER_GAP - counterWidth(state.coins, true), m, s, "coin", state.coins, true, images)
 
           // power meter: SM64's two halves with the pie for however many wedges are left
           var wedges = Math.max(0, Math.min(8, state.wedges | 0))
@@ -122,7 +151,7 @@ angular.module("beamng.apps").directive("ng64Hud", [
             if (!fullSince) fullSince = now
             else if (now - fullSince > METER_HIDE_AFTER_MS) meterVisible = false
           }
-          place(meter.box, cx - 20 - 32, (meterVisible ? METER_Y : METER_HIDDEN_Y) - 32, s)
+          place(meter.box, cx - 32, meterVisible ? m : METER_HIDDEN_Y, s)
           size(meter.box, 64, 64, s)
           meter.left.style.display = meter.right.style.display = images ? "" : "none"
           meter.text.style.display = images ? "none" : ""
@@ -146,7 +175,7 @@ angular.module("beamng.apps").directive("ng64Hud", [
           // camera status, bottom right: SM64's camera icon with Lakitu (the only camera NG64 has)
           camera.box.style.display = images ? "" : "none"
           if (images) {
-            place(camera.box, right - 54, 205, s)
+            place(camera.box, right - m - 32, bottom - m - 16, s)
             camera.cam.src = IMG + "camera.png"
             camera.lakitu.src = IMG + "lakitu.png"
             size(camera.cam, 16, 16, s)
