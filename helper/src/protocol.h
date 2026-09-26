@@ -27,6 +27,7 @@
 #define MSG_PING      'P'
 #define MSG_CONTROL   'N'  // u8: 1 = the player controls Mario, 0 = another vehicle (Mario stays, input off)
 #define MSG_FOCUS     'Z'  // u8: 1 = the game window has focus (input is only read then). Sent on change and every second
+#define MSG_HEAL      'h'  // u8 healCounter: heal Mario like SM64 coins do (4 = one wedge). Older helpers ignore it
 #define MSG_TELEPORT  'M'  // f32 x, y, z (bng); optional u8 reset (full health, freefall)
 #define MSG_PART_REQ  'B'  // u32 key; u8 part; u32 hash - the client has no geometry for this part/hash (lost or new)
 

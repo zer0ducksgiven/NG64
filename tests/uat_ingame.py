@@ -476,9 +476,36 @@ lua("ng64.teleport(%f,%f,%f)" % (cx + fx * 0.1, cy + fy * 0.1, cz + 4.5))
 time.sleep(2.5)
 check(damage() > d0 and status().get("hits", 0) > 0, "landing on a car from a height dents it (damage %.0f -> %.0f)" % (d0, damage()))
 
+# -- SM64 HUD: its own UI layout while you're Mario, SM64's graphics from the ROM, power meter, lives, coins ---------
+def ui_layout():
+    return lua("local l = ui_appLayouts and ui_appLayouts.getCurrentLayout() return tostring(l and l.type)")
+check(ui_layout() == "ng64Mario", "Mario's HUD layout is selected while you play as Mario (%s)" % ui_layout())
+hud = status().get("hud") or {}
+check(hud.get("images") is True, "the helper wrote SM64's HUD graphics from the ROM")
+lua("ng64.hud.reset() ng64.teleport(%f,%f,%f,true)" % (cx + 8, cy + 8, cz + 1))
+time.sleep(2)
+h0 = status().get("health")
+lua("ng64.testHurt(3)")
+time.sleep(2)
+h1 = status().get("health")
+check(h0 is not None and h1 is not None and (h0 >> 8) - (h1 >> 8) == 3, "a 3-wedge hit takes 3 wedges off the power meter (%s -> %s)" % (h0, h1))
+lua("ng64.hud.collectCoin(1)")
+time.sleep(1.5)
+h2 = status().get("health")
+check(h2 is not None and (h2 >> 8) == (h1 >> 8) + 1 and status()["hud"]["coins"] == 1, "a coin counts and heals a wedge (%s -> %s)" % (h1, h2))
+lua("ng64.testHurt(8)")
+time.sleep(2.5)
+hud = status()["hud"]
+check(hud["lives"] == 3 and hud["coins"] == 0, "dying costs a life and the coins (lives %s, coins %s)" % (hud["lives"], hud["coins"]))
+p = status()["pos"]
+lua("ng64.teleport(%f,%f,%f,true)" % (p[0], p[1], p[2] + 0.5))
+time.sleep(2)
+check(status().get("health") == 0x880 and status()["hud"]["lives"] == 3, "respawning brings him back at full health, lives kept")
+
 # switching to another vehicle: Mario stays in the world, standing; the game camera and controls go to the car
 lua("be:enterVehicle(0, _ng64uatCar)")
 time.sleep(1.5)
+check(ui_layout() != "ng64Mario", "the game's own layout comes back when you drive something else (%s)" % ui_layout())
 st = status()
 check(st.get("active") is True and st.get("controlled") is False and st.get("meshes", 0) >= 1,
       "switching to another vehicle leaves Mario in the world (active %s, controlled %s, meshes %s)" % (st.get("active"), st.get("controlled"), st.get("meshes")))
@@ -493,6 +520,7 @@ lua("be:enterVehicle(0, be:getObjectByID(ng64.getStatus().stubId))")
 time.sleep(1.5)
 st = status()
 check(st.get("controlled") is True and "true" in lua("return tostring(commands.isFreeCamera())"), "switching back to Mario gives control back")
+check(ui_layout() == "ng64Mario", "switching back to Mario brings his HUD back (%s)" % ui_layout())
 
 # -- replacing Mario from the vehicle spawner: the new car takes over his anchor's id; Mario must go, not keep pulling
 # the car onto himself with the camera stuck on him ----------------------------------------------------------------

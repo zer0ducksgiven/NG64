@@ -1,0 +1,20 @@
+{
+  "domElement": "<ng64-hud></ng64-hud>",
+  "name": "NG64 Mario HUD",
+  "types": ["ui.apps.categories.vehicle_info"],
+  "description": "Super Mario 64's HUD for NG64 Mario: power meter, lives, coins, stars and camera. Uses the HUD graphics from your own ROM.",
+  "css": {
+    "top": "0px",
+    "left": "0px",
+    "right": "0px",
+    "bottom": "0px",
+    "width": "100%",
+    "height": "100%"
+  },
+  "author": "NG64",
+  "version": "1.0",
+  "directive": "ng64Hud",
+  "category": "General",
+  "isAuxiliary": false,
+  "interactive": "no"
+}

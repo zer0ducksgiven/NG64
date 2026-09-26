@@ -20,6 +20,9 @@
 
 int png_write_rgba(const char *path, const uint8_t *rgba, int w, int h);
 int ng64_audio_start(const uint8_t *rom);
+int ng64_hud_extract(const uint8_t *rom, size_t romLen);
+int ng64_hud_write(const char *userPath);
+static int s_hudOk;
 void ng64_audio_stop(void);
 
 extern uint32_t s_tick;   // simulation tick, defined with the frame sender
@@ -1474,7 +1477,8 @@ static void handle_packet(const uint8_t *p, int len)
         }
         if (ver != NG64_PROTO_VERSION) { send_welcome(0, "protocol version mismatch - update the NG64 helper or mod"); break; }
         if (!s_atlasGamePath[0] || s_atlasDirty) write_atlas();
-        send_welcome(1, "ok");
+        if (s_hudOk && !ng64_hud_write(s_userPath)) logf_("could not write the HUD graphics into %s\\ng64_cache\\hud", s_userPath);
+        send_welcome(1, s_hudOk ? "ok hud" : "ok");
         logf_("hello from mod, user path %s", s_userPath);
         break;
     }
@@ -1624,6 +1628,7 @@ static void handle_packet(const uint8_t *p, int len)
         }
         break;
     case MSG_PING: { char pong = MSG_PING; send_raw(&pong, 1); break; }
+    case MSG_HEAL: { Mario *m = mario_find(0); if (m && len >= 1) sm64_mario_heal(m->id, p[0]); break; }
     case MSG_FOCUS:
         if (len >= 1 && s_gameFocused != (p[0] != 0)) {
             s_gameFocused = p[0] != 0;
@@ -1709,6 +1714,8 @@ int main(int argc, char **argv)
         if (!s_audioOk) logf_("audio unavailable - continuing without sound");
     }
     logf_("libsm64 initialised from %s", romPath);
+    s_hudOk = ng64_hud_extract(rom, romLen);
+    if (!s_hudOk) logf_("HUD graphics not found in this ROM (not a US ROM?) - the HUD will use plain text");
 
     HMODULE xi = LoadLibraryA("xinput1_4.dll");
     if (!xi) xi = LoadLibraryA("xinput9_1_0.dll");

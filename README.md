@@ -47,6 +47,14 @@ folder as `Resources/Server/NG64/`. Every player needs the helper running.
 
 Input is only read while the BeamNG window has focus. To stop playing as Mario, switch to any other vehicle.
 
+**HUD:** while you play as Mario, the UI switches to the "NG64 Mario" layout: Super Mario 64's own HUD, drawn with
+the HUD graphics from your ROM (the helper extracts them into `ng64_cache/hud/` in your BeamNG user folder). The
+power meter shows Mario's health and hides again once he's back to full; the counters show lives, coins and stars.
+Lives work like SM64: 4 to start, one lost each time Mario's health runs out (respawn him with the vehicle reset,
+R), and after the last one the next respawn starts again at 4. Driving any other vehicle brings back the game's own
+layout. Nothing in BeamNG gives coins or stars yet; a map or mod can call `ng64.hud.collectCoin(n)` (which also heals
+a wedge per coin, as in SM64), `ng64.hud.collectStar(n)` and `ng64.hud.addLife(n)`.
+
 **Wine / Proton (Linux):** run the helper in the game's own Wine prefix, or Mario has no textures (the helper writes
 his texture into the game's user folder, and a different prefix has a different `C:\`):
 

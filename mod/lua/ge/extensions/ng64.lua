@@ -8,6 +8,7 @@ local logTag = "ng64"
 
 local ffi = require("ffi")
 local world = require("ge/extensions/ng64World")
+local hud = require("ge/extensions/ng64Hud")
 
 local HELPER_HOST, HELPER_PORT = "127.0.0.1", 47064
 local PROTO_VERSION = 9
@@ -753,6 +754,7 @@ local function deactivate()
   deleteMesh(0)
   lastLocalFrame = nil
   lastPoseArrival = nil
+  hud.deactivate()
   if commands.isFreeCamera() then commands.setGameCamera() end
   -- a vehicle replace puts the previous camera mode (Mario's free camera) back after spawning: retry a while
   restoreCameraUntil = simTime + 1.5
@@ -888,6 +890,8 @@ local function handlePacket(data)
     local ok = string.byte(data, 2) == 1
     local msg, path = string.match(string.sub(data, 3), "^([^%z]*)%z([^%z]*)")
     if ok then
+      -- the reply to our hello says whether the helper wrote the HUD graphics (a later "atlas" resend doesn't)
+      if msg and msg:sub(1, 2) == "ok" then hud.setImages(msg:find("hud") ~= nil) end
       if not connected then log("I", logTag, "connected to NG64 helper") end
       connected = true
       warnedNoHelper = false
@@ -1037,6 +1041,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
 
   sendRaw("P")
   sendFocus()
+  hud.update(simTime, lastLocalFrame, active, controlled)
   if pendingActivateId and simTime >= pendingActivateAt then
     local veh = be:getObjectByID(pendingActivateId)
     if not veh then
@@ -1187,6 +1192,7 @@ local function getStatus()
     pos = f and { f.pos.x, f.pos.y, f.pos.z }, health = f and f.health, action = f and f.action,
     numVerts = f and f.numVerts, frameAge = f and (simTime - localFrameTime), hits = hitCount, hurts = hurtCount, hulls = hullCount, carDents = carDentCount, meshBuilds = meshBuilds, poseUpdates = poseUpdates, hullPieces = hullPieces, carrying = carryingId, carries = carryCount, throws = throwCount, worldTris = meshTris, world = world.stats(), lastToast = lastToast, profCreate = profCreate, framesStarted = framesStarted, framesCompleted = framesCompleted,
     meshes = (function() local n = 0 for _ in pairs(meshes) do n = n + 1 end return n end)(),
+    hud = hud.getState(),
   }
 end
 
@@ -1204,6 +1210,16 @@ M.onClientEndMission = onClientEndMission
 M.scriptInput = scriptInput
 M.teleport = teleport
 M.getStatus = getStatus
+-- SM64 HUD: lives, coins, stars (ng64.hud.collectCoin / collectStar / addLife, for maps and other mods)
+M.hud = hud
+M.onGameStateUpdate = hud.onGameStateUpdate
+hud.setHealer(function(healCounter) sendRaw("h" .. string.char(math.max(0, math.min(255, healCounter)))) end)
+-- tests: hurt Mario by this many wedges, from a point beside him
+M.testHurt = function(wedges)
+  local f = lastLocalFrame
+  if not f then return end
+  sendRaw("K" .. packF(f.pos.x + 1, f.pos.y, f.pos.z) .. string.char(wedges or 1, 0))
+end
 -- tests: ask the helper for SM64's floor height under each {x,y,z}; the answer arrives in a later frame (getFloorReply)
 M.floorQuery = function(points)
   floorReply = nil
