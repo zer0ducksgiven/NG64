@@ -908,10 +908,33 @@ static void carry_update(Mario *m, const Pad *pad)
             sm64_mario_drop_held(m->id);
             sm64_set_mario_action(m->id, ACT_IDLE_NG64);
         }
-        // where the piece's underside should be: overhead for a heavy lift, in front of his chest for a light one
+        // where the piece's underside should rest: on his gloves, wherever this frame's animation has put them (the
+        // gloves are the only pure-white part of the model) - so it sits in his hands and bobs with them, the way
+        // King Bob-omb does. Fixed points above/in front of him are the fallback.
         float fx = sinf(st->faceAngle), fz = cosf(st->faceAngle);
         float hold[3];
-        if (s_carry.heavy) { hold[0] = st->position[0] + fx * 10; hold[1] = st->position[1] + 175; hold[2] = st->position[2] + fz * 10; }
+        float gx = 0, gz = 0, gTop = -1e9f, gBot = 1e9f;
+        int gn = 0;
+        for (int i = 0; i < m->geo.numTrianglesUsed * 3; i++) {
+            const float *c = &m->geo.color[i * 3];
+            if (c[0] < 0.9f || c[1] < 0.9f || c[2] < 0.9f) continue;
+            const float *vp = &m->geo.position[i * 3];
+            gx += vp[0]; gz += vp[2]; gn++;
+            if (vp[1] > gTop) gTop = vp[1];
+            if (vp[1] < gBot) gBot = vp[1];
+        }
+        if (gn > 0) {
+            hold[0] = gx / gn; hold[2] = gz / gn;
+            if (s_carry.heavy) {
+                // his raised hands sit either side of his head (gloves top out ~18 units below his cap), so a car
+                // resting on them would pass through his head: it sits just on top of him instead, like King Bob-omb
+                float top = gTop;
+                for (int i = 0; i < m->geo.numTrianglesUsed * 3; i++) if (m->geo.position[i * 3 + 1] > top) top = m->geo.position[i * 3 + 1];
+                hold[1] = top + 3;
+            } else {
+                hold[1] = gBot;                     // light: held between his hands
+            }
+        } else if (s_carry.heavy) { hold[0] = st->position[0] + fx * 10; hold[1] = st->position[1] + 175; hold[2] = st->position[2] + fz * 10; }
         else { hold[0] = st->position[0] + fx * 60; hold[1] = st->position[1] + 60; hold[2] = st->position[2] + fz * 60; }
         float holdB[3];
         sm2bng(hold, holdB);

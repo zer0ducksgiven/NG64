@@ -241,7 +241,15 @@ local function carryStart(piece)
   end
   if mass <= 0 then return end
   com = com / mass
-  carry = { nodes = {}, lift = com.z - minZ }
+  -- rest it on its floor right above his hands, not on its lowest point (the tyres): the underside is the lowest
+  -- node near the middle; fall back to the lowest anywhere for small pieces
+  local under = math.huge
+  for _, cid in ipairs(nodes) do
+    local p = base + obj:getNodePosition(cid)
+    if (p.x - com.x) ^ 2 + (p.y - com.y) ^ 2 < 0.7 ^ 2 and p.z < under then under = p.z end
+  end
+  if under == math.huge then under = minZ end
+  carry = { nodes = {}, lift = com.z - under }
   for _, cid in ipairs(nodes) do
     local p = base + obj:getNodePosition(cid)
     carry.nodes[#carry.nodes + 1] = { cid, obj:getNodeMass(cid), p.x - com.x, p.y - com.y, p.z - com.z }

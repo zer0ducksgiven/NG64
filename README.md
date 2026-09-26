@@ -79,7 +79,10 @@ Input is only read while the BeamNG window has focus. To stop playing as Mario, 
   again or B throws it (SM64's heavy throw); the car flies about 24 m and crashes with normal BeamNG damage. Z
   sets a heavy car down (SM64 itself has no heavy put-down) and does SM64's put-down for light pieces. While it's
   in his hands the car has no collision with him and can't hurt him; collision comes back 1.5 s after release.
-  The carried car's own Lua holds it at his hands with a damped spring, so it stays a soft body. Other players
+  The carried car's own Lua holds it with a damped spring, so it stays a soft body. It's placed from the actual
+  animation each frame, found by the gloves (the only pure-white part of the model): a car rests its floor pan
+  just on top of him, on his raised hands, like King Bob-omb, and bobs as he heavy-walks; a light piece sits
+  between his hands. Other players
   don't see the carry yet (local only). libsm64 needs a small addition for this (`helper/patches/libsm64-carry.patch`,
   applied by `helper/build.sh`): SM64's carry code expects a real held object.
 - Getting run over: SM64's own thrown knockback (the tumble from an explosion), launched along the car's travel

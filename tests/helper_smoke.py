@@ -212,7 +212,7 @@ try:
     check(0x383 in acts and 0x08000208 in acts, "Y: SM64 pick-up then heavy hold (actions %s)" % sorted(hex(a) for a in acts))
     check(starts and starts[0][2] == 7 and starts[0][4] == 1, "carry start sent for vehicle 7, heavy (%s)" % (starts[:1],))
     hz = holds[-1][7] if holds else None
-    check(holds and hz is not None and hz > 11.0, "hold point is overhead (z %s, Mario at 10)" % hz)
+    check(holds and hz is not None and 11.05 < hz < 11.35, "hold point rests just on top of his head (z %s, Mario at 10, cap ~11.14)" % hz)
     s.sendto(b"I" + struct.pack("<ffBBBHffB", 0, 0, 0, 0, 0, 2, 0, 1, 1), dst)  # Y again: throw
     fr, cs = collect(2.0)
     acts = {f[11] for f in fr}

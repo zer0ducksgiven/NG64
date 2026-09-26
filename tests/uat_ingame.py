@@ -146,7 +146,7 @@ ps = "/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 here = os.path.dirname(os.path.abspath(__file__)).replace("/f/", "F:/")
 os.makedirs(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tmp"), exist_ok=True)
 env = dict(os.environ, TEMP=here + "/.tmp", TMP=here + "/.tmp", SystemRoot="C:\Windows")   # msys python passes neither
-cap = subprocess.run([ps, "-ExecutionPolicy", "Bypass", "-File", here + "/flicker_capture.ps1", "-Frames", "150"],
+cap = subprocess.run([ps, "-ExecutionPolicy", "Bypass", "-File", here + "/flicker_capture.ps1", "-Frames", "150", "-LowBelow", "0", "-OutDir", here + "/shots"],   # blank grabs are kept as shots/cap_N.png
                      capture_output=True, text=True, env=env).stdout
 counts = [int(c) for c in cap.split("COUNTS")[-1].strip().split(",")] if "COUNTS" in cap else []
 check(len(counts) == 150 and min(counts) > 0, "no flicker: Mario drawn in %d/%d desktop grabs (min red %s; the old bug gave exactly 0)" % (sum(1 for c in counts if c > 0), len(counts), min(counts) if counts else None))
@@ -335,11 +335,11 @@ z0 = centre()[2]
 lua("ng64.scriptInput(0,0,false,false,false,2,%f,%f,true)" % (-nx, -ny))
 time.sleep(3.0)
 c1 = centre(); st = status()
-check(str(st.get("carrying")) == carId and c1[2] - z0 > 1.0, "Y lifts the car overhead (carrying %s, centre up %.2f m)" % (st.get("carrying"), c1[2] - z0))
+check(str(st.get("carrying")) == carId and c1[2] - z0 > 0.6, "Y lifts the car onto his hands (carrying %s, centre up %.2f m)" % (st.get("carrying"), c1[2] - z0))
 lua("ng64.scriptInput(0,-1,false,false,false,60,1,0)"); time.sleep(2.5)
 st = status(); c2 = centre()
 gap = ((st["pos"][0] - c2[0]) ** 2 + (st["pos"][1] - c2[1]) ** 2) ** 0.5
-check(gap < 1.5 and c2[2] - z0 > 1.0, "the car goes where he goes (%.2f m from him, still %.2f m up)" % (gap, c2[2] - z0))
+check(gap < 1.5 and c2[2] - z0 > 0.6, "the car goes where he goes (%.2f m from him, still %.2f m up)" % (gap, c2[2] - z0))
 shot("10_carry")
 d0 = damage()
 lua("ng64.scriptInput(0,0,false,false,false,2,1,0,true)")          # Y again: throw
