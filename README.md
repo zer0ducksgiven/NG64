@@ -120,10 +120,14 @@ Input is only read while the BeamNG window has focus. To stop playing as Mario, 
   box is built from collidable nodes, and the anchor deliberately has none, because it would be an invisible,
   immovable post. The anchor spawns and works; the message is cosmetic.
 
-- **Map collision** is the map's real collision geometry: every colliding object within 32 m (buildings, ramps,
+- **Map collision** is the map's real collision geometry: every colliding object near Mario (buildings, ramps,
   walls, rails, props, trees, rocks) is loaded from its shape's COLLADA collision mesh, placed exactly where
   BeamNG has it. "Visible Mesh" objects use their visible mesh, like BeamNG's physics does. Terrain is sampled on
-  a grid (a heightfield, which sampling captures), and terrain-less levels use their ground plane. Shapes are
+  a grid (a heightfield, which sampling captures), and terrain-less levels use their ground plane. The map is
+  streamed to the helper in 16 m cells: the 3x3 around Mario, each sent once when it comes into range and dropped
+  when he's two cells away. (Re-sending the whole area every 8 m was up to 128k triangles at a time on Gridmap v2,
+  a stutter every second or so while running.) Triangles are kept in FFI arrays so Lua's garbage collector never
+  scans them, and the helper rebuilds its collision at most twice a second (about 15 ms). Shapes are
   parsed once, in the background, prefetched within 120 m of Mario. A very large one (West Coast USA's island
   backdrop is a 164 MB file) can take up to about 20 s the first time, and until then that one object has no
   collision. There is no water. Measured with `tests/clip_probe.py` (60 s of random running, jumping, diving and

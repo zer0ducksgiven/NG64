@@ -4,14 +4,15 @@
 #include <stdint.h>
 
 #define NG64_PORT          47064
-#define NG64_PROTO_VERSION 7
+#define NG64_PROTO_VERSION 8
 
 // BeamNG metres per SM64 unit (same scale sm64-san-andreas uses for GTA).
 #define NG64_SCALE 0.0085f
 
 // client -> helper
 #define MSG_HELLO     'H'  // u16 version, str userPath\0
-#define MSG_MESH      'O'  // u32 region; u16 chunk, chunks, tris; f32 tris[tris*9] (bng world) - map objects' collision triangles
+#define MSG_MESH      'O'  // u32 cell; u16 chunk, chunks, tris; f32 tris[tris*9] (bng world) - one 16 m map cell's collision triangles
+#define MSG_MESH_DROP 'Y'  // u32 cell (0xFFFFFFFF = all): Mario has left it
 #define MSG_FLOOR_QUERY 'Q'  // tests: u32 id; u16 n; f32 points[n*3] (bng) -> MSG_FLOOR_REPLY
 #define MSG_FLOOR_REPLY 'q'  // u32 id; u16 n; f32 floorZ[n] (bng, NaN = none)
 #define MSG_TERRAIN   'T'  // f32 cx, cy, spacing; u16 n; f32 heights[n*n] (bng z, NaN = no ground)

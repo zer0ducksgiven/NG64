@@ -28,8 +28,8 @@ for h in hs:
     sec = h.get("sections") or {}
     top = sorted(sec.items(), key=lambda kv: -kv[1])[:3]
     w = h.get("world") or {}
-    print("  t %7.2f  frame %5.0f ms | NG64: %s | builds %s grids %s worldTris %s parsed %s pending %s" % (
-        h["t"], h["dt"] * 1000, ", ".join("%s %.1f ms" % (k, v * 1000) for k, v in top) or "-",
+    print("  t %7.2f  frame %5.0f ms | Lua %4.0f MB, freed %5.1f MB | NG64: %s | builds %s grids %s worldTris %s parsed %s pending %s" % (
+        h["t"], h["dt"] * 1000, h.get("luaMB", 0), h.get("gcFreedMB", 0), ", ".join("%s %.1f ms" % (k, v * 1000) for k, v in top) or "-",
         h.get("builds"), h.get("grids"), h.get("worldTris"), w.get("shapesParsed"), w.get("shapesPending")))
 print("%d gaps over 100 ms between Mario's poses arriving" % len(gaps))
 for g in gaps:

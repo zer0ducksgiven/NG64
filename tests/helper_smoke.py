@@ -15,7 +15,7 @@ def check(cond, msg):
     if not cond: fails.append(msg)
 
 try:
-    s.sendto(b"H" + struct.pack("<H", 7) + user.encode(), dst)
+    s.sendto(b"H" + struct.pack("<H", 8) + user.encode(), dst)
     d, _ = s.recvfrom(65536)
     check(d[0:1] == b"W" and d[1] == 1, "welcome ok")
     atlas = d[2:].split(b"\0")[1].decode()
@@ -96,6 +96,27 @@ try:
     f = frames(2.0)
     moved = math.hypot(f[-1][2] - f0[2], f[-1][3] - f0[3])
     check(moved > 3, "running moved %.2f m" % moved)
+
+    # map cells: a streamed 16 m cell with a floor 2 m up is solid; two cells sharing a triangle are fine; dropping
+    # the cells removes the floor
+    def cell(cid, tris):
+        s.sendto(b"O" + struct.pack("<IHHH", cid, 0, 1, len(tris)) + b"".join(struct.pack("<9f", *t) for t in tris), dst)
+    floor = [(-3, -3, 12, 3, -3, 12, 3, 3, 12), (-3, -3, 12, 3, 3, 12, -3, 3, 12)]
+    cell(0x80008000, floor)
+    cell(0x80008001, floor)   # the same triangles again from a neighbouring cell
+    time.sleep(0.3)
+    s.sendto(b"M" + struct.pack("<fff", 0, 0, 12.5), dst)
+    f = frames(1.2)
+    check(abs(f[-1][4] - 12.0) < 0.2, "stands on a streamed map cell z=%.3f" % f[-1][4])
+    s.sendto(b"Y" + struct.pack("<I", 0x80008000), dst)
+    time.sleep(0.3)
+    s.sendto(b"M" + struct.pack("<fff", 0, 0, 12.5), dst)
+    f = frames(1.2)
+    check(abs(f[-1][4] - 12.0) < 0.2, "the other cell still holds the shared floor z=%.3f" % f[-1][4])
+    s.sendto(b"Y" + struct.pack("<I", 0xFFFFFFFF), dst)
+    time.sleep(0.3)
+    f = frames(1.5)
+    check(abs(f[-1][4] - 10.0) < 0.2, "dropping every cell removes the floor (back on the ground z=%.3f)" % f[-1][4])
 
     # run east into the 3 m block: must stop at the wall, not climb it
     s.sendto(b"M" + struct.pack("<fff", 0, 0, 10.2), dst)

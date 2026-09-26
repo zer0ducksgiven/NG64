@@ -10,7 +10,7 @@ local ffi = require("ffi")
 local world = require("ge/extensions/ng64World")
 
 local HELPER_HOST, HELPER_PORT = "127.0.0.1", 47064
-local PROTO_VERSION = 7
+local PROTO_VERSION = 8
 local STUB_MODEL = "ng64_mario"
 
 local GRID_N, GRID_SP = 49, 0.5         -- terrain sample grid around Mario (24 m square)
@@ -29,18 +29,18 @@ typedef struct {
   int16_t health; uint32_t action; int16_t animId; int16_t animFrame; uint32_t flags;
   float camPos[3]; float camTarget[3];
   uint16_t numVerts; uint16_t numParts; uint32_t tick;
-} ng64v7_FrameHeader;
-typedef struct { uint32_t hash; float pos[3]; float axes[3][3]; } ng64v7_PartPose;
-typedef struct { uint8_t type; uint32_t key; uint8_t part; uint32_t hash; uint16_t nv; uint16_t ni; } ng64v7_PartHeader;
-typedef struct { int16_t p[3]; int8_t n[3]; uint16_t uv[2]; } ng64v7_PackedVert;
-typedef struct { uint8_t type; uint32_t vehId; float point[3]; float dir[3]; float strength; } ng64v7_Hit;
-typedef struct { uint8_t type; uint8_t kind; uint32_t vehId; uint8_t piece; uint8_t heavy; float point[3]; float yaw; float vel[3]; } ng64v7_Carry;
+} ng64v8_FrameHeader;
+typedef struct { uint32_t hash; float pos[3]; float axes[3][3]; } ng64v8_PartPose;
+typedef struct { uint8_t type; uint32_t key; uint8_t part; uint32_t hash; uint16_t nv; uint16_t ni; } ng64v8_PartHeader;
+typedef struct { int16_t p[3]; int8_t n[3]; uint16_t uv[2]; } ng64v8_PackedVert;
+typedef struct { uint8_t type; uint32_t vehId; float point[3]; float dir[3]; float strength; } ng64v8_Hit;
+typedef struct { uint8_t type; uint8_t kind; uint32_t vehId; uint8_t piece; uint8_t heavy; float point[3]; float yaw; float vel[3]; } ng64v8_Carry;
 #pragma pack(pop)
 ]])
-local FRAME_HEADER_SIZE = ffi.sizeof("ng64v7_FrameHeader")
-local PART_POSE_SIZE = ffi.sizeof("ng64v7_PartPose")
-local PART_HEADER_SIZE = ffi.sizeof("ng64v7_PartHeader")
-local VERT_SIZE = ffi.sizeof("ng64v7_PackedVert")
+local FRAME_HEADER_SIZE = ffi.sizeof("ng64v8_FrameHeader")
+local PART_POSE_SIZE = ffi.sizeof("ng64v8_PartPose")
+local PART_HEADER_SIZE = ffi.sizeof("ng64v8_PartHeader")
+local VERT_SIZE = ffi.sizeof("ng64v8_PackedVert")
 
 local sock
 local connected = false
@@ -128,13 +128,13 @@ end
 
 
 -- BeamNG's sandboxed ffi refuses pointer casts/arithmetic, so packets are ffi.copy'd into typed scratch buffers
-local hdrBuf = ffi.new("ng64v7_FrameHeader")
-local partHdrBuf = ffi.new("ng64v7_PartHeader")
-local hitBuf = ffi.new("ng64v7_Hit")
-local carryBuf = ffi.new("ng64v7_Carry")
-local chunkVerts = ffi.new("ng64v7_PackedVert[?]", 700)
+local hdrBuf = ffi.new("ng64v8_FrameHeader")
+local partHdrBuf = ffi.new("ng64v8_PartHeader")
+local hitBuf = ffi.new("ng64v8_Hit")
+local carryBuf = ffi.new("ng64v8_Carry")
+local chunkVerts = ffi.new("ng64v8_PackedVert[?]", 700)
 local chunkIdx = ffi.new("uint16_t[?]", 4000)
-local partPoses = ffi.new("ng64v7_PartPose[?]", 64)
+local partPoses = ffi.new("ng64v8_PartPose[?]", 64)
 
 -- Poses are timed by the helper's simulation tick (exactly 1/30 s apart), not by when they arrive: Lua only reads the
 -- socket once per rendered frame, so arrival times are lumpy, and blending by them made Mario stall every few
@@ -597,68 +597,125 @@ local function activate(veh)
   pendingActivateId, pendingActivateAt, waitingLogged = stubId, simTime, false
 end
 
--- the map's objects around Mario: re-sent whenever he's moved this far from the last region's centre
-local MESH_RADIUS, MESH_HEIGHT, MESH_REFRESH = 32, 25, 8
-local MESH_TRIS_PER_PACKET = 200            -- 200 * 36 bytes stays under LuaSocket's 8 KB datagrams
-local meshCenter, meshRegionId, meshWanted, meshTris, meshLevel = nil, 0, nil, 0, nil
+-- The map's objects around Mario, streamed as fixed 16 m cells (ng64World.CELL): each cell is sent once when it
+-- comes within CELL_RANGE of his cell and removed once he's CELL_DROP away, so running around only sends the new
+-- edge. (Re-sending the whole 64 m region every 8 m was up to 128k triangles at a time on Gridmap v2: a stutter
+-- every second or so.) Cells are sent nearest first, a few milliseconds' worth per frame.
+local CELL_RANGE, CELL_DROP = 1, 2         -- cells: Mario always has at least 16 m of map around him
+local CELL_ZR, CELL_REZ = 30, 12           -- a cell covers +- CELL_ZR m of Mario's height, redone if he moves CELL_REZ
+local CELL_BUDGET = 0.003                  -- seconds of cell work per frame
+local cells = {}                           -- key -> { ix, iy, z, dirty, pending, tris }
+local cellSends, meshTris, meshLevel = 0, 0, nil
 
-local function sendMesh(tris)
-  meshRegionId = meshRegionId + 1
-  local nTris = #tris / 9
-  local chunks = math.max(1, math.ceil(nTris / MESH_TRIS_PER_PACKET))
-  local buf = ffi.new("float[?]", MESH_TRIS_PER_PACKET * 9)
-  for c = 0, chunks - 1 do
-    local first = c * MESH_TRIS_PER_PACKET
-    local count = math.min(MESH_TRIS_PER_PACKET, nTris - first)
-    for i = 0, count * 9 - 1 do buf[i] = tris[first * 9 + i + 1] end
-    sendRaw("O" .. packU32(meshRegionId) .. packU16(c) .. packU16(chunks) .. packU16(count) .. ffi.string(buf, count * 36))
+local function cellId(ix, iy) return (ix + 32768) % 65536 + ((iy + 32768) % 65536) * 65536 end
+
+local function sendCell(c)
+  local bufs, nTris, pending = world.cellChunks(c.ix, c.iy, c.z, CELL_ZR)
+  local per = world.CHUNK_TRIS
+  local chunks = math.max(1, math.ceil(nTris / per))
+  local id = packU32(cellId(c.ix, c.iy))
+  for k = 0, chunks - 1 do
+    local count = math.max(0, math.min(per, nTris - k * per))
+    sendRaw("O" .. id .. packU16(k) .. packU16(chunks) .. packU16(count) .. ffi.string(bufs[k + 1], count * 36))
   end
-  meshTris = nTris
+  meshTris = meshTris - (c.tris or 0) + nTris
+  c.tris, c.pending, c.dirty = nTris, pending, false
+  cellSends = cellSends + 1
 end
 
--- Send the region around p with every shape that's parsed so far; if some are still being parsed, send it again
--- (updateMesh) each time more of them are ready. Blocking (spawn, teleport) gives parsing a few seconds first.
-local meshPending = 0
+local function clearCells()
+  cells, meshTris = {}, 0
+  sendRaw("Y" .. packU32(0xFFFFFFFF))
+end
 
-local function requestMesh(p, blocking)
+local function checkLevel()
   local level = getMissionFilename and getMissionFilename() or ""
   if meshLevel ~= level then
     meshLevel = level
     local t0 = os.clock()
     local n = world.index()
+    clearCells()
     log("I", logTag, string.format("indexed %d colliding map objects in %.2f s", n, os.clock() - t0))
   end
-  local deadline = os.clock() + (blocking and 3 or 0)
-  local tris, pending = world.region(p.x, p.y, p.z, MESH_RADIUS, MESH_HEIGHT)
-  while pending > 0 and os.clock() < deadline do
-    world.step(0.25)
-    tris, pending = world.region(p.x, p.y, p.z, MESH_RADIUS, MESH_HEIGHT)
-  end
-  sendMesh(tris)
-  meshCenter, meshPending = vec3(p.x, p.y, p.z), pending
-  meshWanted = pending > 0 and meshCenter or nil
 end
 
 local PREFETCH_RADIUS, prefetchAt = 120, 0
+local parseLeft = math.huge
 
-local function updateMesh(pos)
+-- keep the cells around pos: add new ones, drop far ones, (re)send whatever needs it within budget seconds
+local function updateCells(pos, budget)
+  budget = budget or CELL_BUDGET
+  checkLevel()
   if simTime >= prefetchAt then
     prefetchAt = simTime + 2
     world.prefetch(pos.x, pos.y, PREFETCH_RADIUS)
   end
   local left = world.step(0.004)
-  if meshWanted and left < meshPending then
-    requestMesh(meshWanted, false)       -- more shapes finished: resend the fuller region
-  elseif not meshCenter or (vec3(pos.x, pos.y, 0) - vec3(meshCenter.x, meshCenter.y, 0)):length() > MESH_REFRESH
-      or math.abs(pos.z - meshCenter.z) > MESH_HEIGHT * 0.5 then
-    requestMesh(pos, false)
+  local parsedMore = left < parseLeft
+  parseLeft = left
+  local cs = world.CELL
+  local cx, cy = math.floor(pos.x / cs), math.floor(pos.y / cs)
+  for ix = cx - CELL_RANGE, cx + CELL_RANGE do
+    for iy = cy - CELL_RANGE, cy + CELL_RANGE do
+      local key = cellId(ix, iy)
+      local c = cells[key]
+      if not c then
+        cells[key] = { ix = ix, iy = iy, z = pos.z, dirty = true }
+      elseif math.abs(c.z - pos.z) > CELL_REZ then
+        c.z, c.dirty = pos.z, true
+      elseif parsedMore and (c.pending or 0) > 0 then
+        c.dirty = true                       -- more of the shapes it needed are ready now
+      end
+    end
   end
+  local todo
+  for key, c in pairs(cells) do
+    if math.abs(c.ix - cx) > CELL_DROP or math.abs(c.iy - cy) > CELL_DROP then
+      sendRaw("Y" .. packU32(key))
+      meshTris = meshTris - (c.tris or 0)
+      cells[key] = nil
+    elseif c.dirty then
+      todo = todo or {}
+      todo[#todo + 1] = c
+    end
+  end
+  if not todo then return end
+  table.sort(todo, function(a, b)
+    return math.abs(a.ix - cx) + math.abs(a.iy - cy) < math.abs(b.ix - cx) + math.abs(b.iy - cy)
+  end)
+  local t0 = os.clock()
+  for _, c in ipairs(todo) do
+    sendCell(c)
+    if os.clock() - t0 > budget then break end
+  end
+end
+
+-- all cells around p at once (spawn, teleport), giving shape parsing a few seconds first so he arrives on solid
+-- ground; anything still parsing after that follows in updateCells
+local function loadCellsNow(p)
+  checkLevel()
+  local deadline = os.clock() + 3
+  local cs = world.CELL
+  local cx, cy = math.floor(p.x / cs), math.floor(p.y / cs)
+  while os.clock() < deadline do
+    local pending = 0
+    for ix = cx - CELL_RANGE, cx + CELL_RANGE do
+      for iy = cy - CELL_RANGE, cy + CELL_RANGE do
+        local _, _, pd = world.cellChunks(ix, iy, p.z, CELL_ZR)
+        pending = pending + pd
+      end
+    end
+    if pending == 0 then break end
+    world.step(0.25)
+  end
+  for _, c in pairs(cells) do c.dirty = true end
+  updateCells(p, math.huge)
 end
 
 local function finishActivate(veh)
   local p = veh:getPosition()
   -- the map objects around the spawn point first (blocking, once), so he has walls and floors from frame one
-  requestMesh(p, true)
+  loadCellsNow(p)
   -- synchronous grid so Mario has a floor the moment he spawns
   startGrid(p)
   stepGrid(GRID_N * GRID_N)
@@ -877,26 +934,34 @@ local function prof(name)
   profT = now
 end
 
-local lastMaterialCheck
-local lastUpdateWall
-local function onUpdate(dtReal, dtSim, dtRaw)
+local lastUpdateWall, lastLuaKB
+-- start of every update: note the last frame if it was long, and start timing this one
+local function noteFrame()
   -- measured on the wall clock: the dt BeamNG passes in doesn't show a long stall (a 1.5 s freeze came in as ~16 ms)
   local wallNow = wallTime()
   local frameDt = lastUpdateWall and (wallNow - lastUpdateWall) or 0
   lastUpdateWall = wallNow
+  local luaKB = collectgarbage("count")
+  local luaDropMB = lastLuaKB and (lastLuaKB - luaKB) / 1024 or 0   -- memory freed since last frame: a GC cycle ran
+  lastLuaKB = luaKB
   if frameDt > 0.03 then
-    local rec = { t = simTime, dt = frameDt, sections = profLast, builds = meshBuilds, worldTris = meshTris, world = world.stats(), grids = gridStarts }
+    local rec = { t = simTime, dt = frameDt, luaMB = luaKB / 1024, gcFreedMB = luaDropMB, sections = profCur, builds = meshBuilds, worldTris = meshTris, world = world.stats(), grids = gridStarts }
     hitches[#hitches + 1] = rec
     if #hitches > 40 then table.remove(hitches, 1) end
-    if frameDt > 0.1 then
+    if frameDt > 0.05 then
       local parts = {}
-      for k, v in pairs(profLast) do if v > 0.002 then parts[#parts + 1] = string.format("%s %.0f ms", k, v * 1000) end end
-      log("W", logTag, string.format("stutter: frame took %.0f ms (NG64: %s; world regions %s, part builds %d)", frameDt * 1000,
-        #parts > 0 and table.concat(parts, ", ") or "under 2 ms", tostring(meshRegionId), meshBuilds))
+      for k, v in pairs(profCur) do if v > 0.002 then parts[#parts + 1] = string.format("%s %.0f ms", k, v * 1000) end end
+      log("W", logTag, string.format("stutter: frame took %.0f ms (NG64: %s; map cells sent %s, part builds %d; Lua %.0f MB, %.0f MB freed)", frameDt * 1000,
+        #parts > 0 and table.concat(parts, ", ") or "under 2 ms", tostring(cellSends), meshBuilds, luaKB / 1024, luaDropMB))
     end
   end
   profLast, profCur = profCur, {}
   profT = os.clock()
+end
+
+local lastMaterialCheck
+local function onUpdate(dtReal, dtSim, dtRaw)
+  noteFrame()
   local dt = dtReal or 0.016
   simTime = simTime + dt
   if not sock then return end
@@ -973,7 +1038,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     prof("misc")
     stepGrid(GRID_SAMPLES_PER_FRAME)
     prof("grid")
-    updateMesh(pos)
+    updateCells(pos)
     prof("world")
     sendVehicles(pos, dt)
     prof("vehicles")
@@ -1067,7 +1132,8 @@ local function onClientEndMission()
   deactivate()
   for key in pairs(meshes) do deleteMesh(key) end
   gridCenter = nil
-  meshCenter, meshWanted, meshLevel = nil, nil, nil
+  meshLevel = nil
+  cells, meshTris = {}, 0
   world.reset()
 end
 
@@ -1083,7 +1149,7 @@ local function teleport(x, y, z, reset)
   -- collision around the destination first, so he doesn't arrive over nothing
   startGrid(vec3(x, y, z))
   stepGrid(GRID_N * GRID_N)
-  requestMesh(vec3(x, y, z), true)
+  loadCellsNow(vec3(x, y, z))
   sendRaw("M" .. packF(x, y, z) .. (reset and string.char(1) or ""))
 end
 

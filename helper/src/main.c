@@ -361,23 +361,50 @@ static void load_terrain(const uint8_t *p, int len)
     reload_static();
 }
 
-// MSG_MESH: u32 region; u16 chunk; u16 chunks; u16 tris; f32 tris[tris * 9] (bng world). A region's chunks are
-// collected and swapped in together, so Mario never stands on half a region.
-static struct { uint32_t region; int chunks, got; float *tris; int n, cap; uint8_t *seen; } s_meshIn;
+// MSG_MESH: u32 cell; u16 chunk; u16 chunks; u16 tris; f32 tris[tris * 9] (bng world). The map's objects arrive as
+// 16 m cells around Mario, each sent once while he's near (MSG_MESH_DROP removes one). A cell's chunks are
+// collected and swapped in together, so Mario never stands on half a cell. Rebuilding sm64's static collision is
+// deferred to the tick loop and done at most every MESH_REBUILD_MS, however many cells change in between.
+#define MAX_CELLS 256
+#define MESH_REBUILD_MS 500   // new cells are at the edge of what Mario can reach: no hurry
+typedef struct { uint32_t id; struct SM64Surface *surf; int count; } MeshCell;
+static MeshCell s_cells[MAX_CELLS];
+static int s_numCells;
+static int s_meshDirty;
+static DWORD s_meshBuiltAt;
+static struct { uint32_t cell; int chunks, got; float *tris; int n, cap; uint8_t *seen; } s_meshIn;
+
+static void cell_remove(uint32_t id)
+{
+    for (int i = 0; i < s_numCells; i++) {
+        if (s_cells[i].id != id) continue;
+        free(s_cells[i].surf);
+        s_cells[i] = s_cells[--s_numCells];
+        s_meshDirty = 1;
+        return;
+    }
+}
+
+static void cells_clear(void)
+{
+    for (int i = 0; i < s_numCells; i++) free(s_cells[i].surf);
+    s_numCells = 0;
+    s_meshDirty = 1;
+}
 
 static void load_mesh_chunk(const uint8_t *p, int len)
 {
     if (len < 10) return;
-    uint32_t region;
+    uint32_t cell;
     uint16_t chunk, chunks, nt;
-    memcpy(&region, p, 4); memcpy(&chunk, p + 4, 2); memcpy(&chunks, p + 6, 2); memcpy(&nt, p + 8, 2);
+    memcpy(&cell, p, 4); memcpy(&chunk, p + 4, 2); memcpy(&chunks, p + 6, 2); memcpy(&nt, p + 8, 2);
     if (chunks == 0 || chunk >= chunks || len < 10 + nt * 36) return;
-    if (s_meshIn.region != region || !s_meshIn.seen) {
+    if (s_meshIn.cell != cell || !s_meshIn.seen || chunk == 0) {
         free(s_meshIn.seen);
-        s_meshIn.region = region; s_meshIn.chunks = chunks; s_meshIn.got = 0; s_meshIn.n = 0;
+        s_meshIn.cell = cell; s_meshIn.chunks = chunks; s_meshIn.got = 0; s_meshIn.n = 0;
         s_meshIn.seen = calloc(chunks, 1);
     }
-    if (s_meshIn.seen[chunk]) return;
+    if (chunks != s_meshIn.chunks || s_meshIn.seen[chunk]) return;
     s_meshIn.seen[chunk] = 1;
     if (s_meshIn.n + nt > s_meshIn.cap) {
         s_meshIn.cap = (s_meshIn.n + nt) * 2;
@@ -397,14 +424,72 @@ static void load_mesh_chunk(const uint8_t *p, int len)
         float nrm[3] = { u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0] };
         surf_push(a, b, c, nrm);
     }
-    free(s_meshSurf);
-    s_meshSurf = malloc(sizeof(struct SM64Surface) * (s_surfCount ? s_surfCount : 1));
-    memcpy(s_meshSurf, s_surfBuf, sizeof(struct SM64Surface) * s_surfCount);
-    s_meshCount = s_surfCount;
     free(s_meshIn.seen);
     s_meshIn.seen = NULL;
+    cell_remove(cell);
+    if (s_numCells >= MAX_CELLS) { logf_("too many map cells, dropping cell %08x", cell); return; }
+    MeshCell *mc = &s_cells[s_numCells++];
+    mc->id = cell;
+    mc->count = s_surfCount;
+    mc->surf = malloc(sizeof(struct SM64Surface) * (s_surfCount ? s_surfCount : 1));
+    memcpy(mc->surf, s_surfBuf, sizeof(struct SM64Surface) * s_surfCount);
+    s_meshDirty = 1;
+}
+
+static void drop_mesh_cell(const uint8_t *p, int len)
+{
+    if (len < 4) return;
+    uint32_t cell;
+    memcpy(&cell, p, 4);
+    if (cell == 0xFFFFFFFFu) cells_clear();
+    else cell_remove(cell);
+}
+
+// all cells' surfaces, without the duplicates of triangles that span several cells
+static void rebuild_mesh_static(void)
+{
+    LARGE_INTEGER t0, t1, fq;
+    QueryPerformanceCounter(&t0);
+    int total = 0;
+    for (int i = 0; i < s_numCells; i++) total += s_cells[i].count;
+    free(s_meshSurf);
+    s_meshSurf = malloc(sizeof(struct SM64Surface) * (total ? total : 1));
+    int cap = 1;
+    while (cap < total * 2) cap <<= 1;
+    int32_t *table = malloc(sizeof(int32_t) * cap);
+    for (int i = 0; i < cap; i++) table[i] = -1;
+    int n = 0;
+    for (int i = 0; i < s_numCells; i++) {
+        for (int k = 0; k < s_cells[i].count; k++) {
+            const struct SM64Surface *s = &s_cells[i].surf[k];
+            const uint8_t *bytes = (const uint8_t *)s->vertices;
+            uint32_t h = 2166136261u;
+            for (size_t b = 0; b < sizeof(s->vertices); b++) h = (h ^ bytes[b]) * 16777619u;
+            uint32_t slot = h & (cap - 1);
+            int dup = 0;
+            while (table[slot] >= 0) {
+                if (!memcmp(s_meshSurf[table[slot]].vertices, s->vertices, sizeof(s->vertices))) { dup = 1; break; }
+                slot = (slot + 1) & (cap - 1);
+            }
+            if (dup) continue;
+            table[slot] = n;
+            s_meshSurf[n++] = *s;
+        }
+    }
+    free(table);
+    s_meshCount = n;
     reload_static();
-    logf_("world mesh region %u: %d triangles -> %d surfaces", region, s_meshIn.n, s_meshCount);
+    s_meshDirty = 0;
+    s_meshBuiltAt = GetTickCount();
+    QueryPerformanceCounter(&t1);
+    QueryPerformanceFrequency(&fq);
+    double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / fq.QuadPart;
+    if (ms > 10) logf_("map collision rebuilt: %d cells, %d surfaces (%d duplicates dropped) in %.0f ms", s_numCells, n, total - n, ms);
+}
+
+static void mesh_update(void)
+{
+    if (s_meshDirty && GetTickCount() - s_meshBuiltAt >= MESH_REBUILD_MS) rebuild_mesh_static();
 }
 
 #define MAX_VEH 64
@@ -1399,6 +1484,7 @@ static void handle_packet(const uint8_t *p, int len)
     }
     case MSG_TERRAIN: load_terrain(p, len); break;
     case MSG_MESH: load_mesh_chunk(p, len); break;
+    case MSG_MESH_DROP: drop_mesh_cell(p, len); break;
     case MSG_FLOOR_QUERY: {
         // tests: SM64's floor height under each point, to compare with BeamNG's own raycasts
         if (len < 6) break;
@@ -1420,9 +1506,10 @@ static void handle_packet(const uint8_t *p, int len)
         send_raw(out, 7 + n * 4);
         break;
     }
-    case MSG_SPAWN: if (len >= 12) spawn_local((const float *)p); break;
+    case MSG_SPAWN: if (s_meshDirty) rebuild_mesh_static(); if (len >= 12) spawn_local((const float *)p); break;
     case MSG_DESPAWN: { Mario *m = mario_find(0); if (m) mario_delete(m); break; }
     case MSG_TELEPORT: {
+        if (s_meshDirty) rebuild_mesh_static();   // the destination's cells were just sent: floors before he lands
         Mario *m = mario_find(0);
         if (m && len >= 12) {
             float sp[3];
@@ -1698,6 +1785,7 @@ int main(int argc, char **argv)
         read_pad(&pad);
         if (!s_inputEnabled) memset(&pad, 0, sizeof(pad));
         music_update(&pad);
+        mesh_update();
         DWORD t = GetTickCount();
 
         for (int i = 0; i < MAX_MARIOS; i++) {
