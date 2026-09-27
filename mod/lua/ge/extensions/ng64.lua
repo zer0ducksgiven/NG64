@@ -805,6 +805,9 @@ fixes.marioBlockedActions = {
   "toggleBigMap", "pause", "toggleRadialMenuMulti", "parkingbrake", "steadycamJump",
   "moveforward", "movebackward", "moveleft", "moveright",
   "accelerate", "brake", "steer_left", "steer_right",
+  -- BeamNG's own camera turning: it fights Mario's camera, and each turn wakes its vehicle-trigger crosshair
+  "rotate_camera_horizontal", "rotate_camera_vertical", "rotate_camera_hz_mouse", "rotate_camera_vt_mouse",
+  "rotate_camera_left", "rotate_camera_right", "rotate_camera_up", "rotate_camera_down",
 }
 function fixes.blockBigMap(block)
   if not core_input_actionFilter then return end

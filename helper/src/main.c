@@ -1383,7 +1383,7 @@ static void update_camera(const Mario *m, const Pad *pad, float dt)
 {
     const struct SM64MarioState *st = &m->state;
     s_camYaw -= pad->rx * 2.5f * dt;
-    s_camPitch += pad->ry * 1.2f * dt;
+    s_camPitch -= pad->ry * 1.2f * dt;   // stick up looks up, like BeamNG's camera
     if (s_camPitch < -0.3f) s_camPitch = -0.3f;
     if (s_camPitch > 1.2f) s_camPitch = 1.2f;
     if (pad->zoomIn) s_camDist -= 600 * dt;
