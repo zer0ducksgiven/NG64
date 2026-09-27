@@ -23,14 +23,25 @@ BeamNG mods can't load native code, so libsm64 runs in a small helper process ne
 
 ## Install
 
-1. Copy `ng64.zip` into `%LOCALAPPDATA%\BeamNG\BeamNG.drive\current\mods\`.
-2. Put `ng64helper.exe` anywhere, with your Super Mario 64 (US) `.z64` ROM in the same folder. Any file name
-   works: the helper uses the first `.z64` there whose header is SM64 (US) and skips any others. You can also put
-   the ROM's full path in `rom.txt` next to the exe, or pass `--rom <path>`.
-3. Start `ng64helper.exe`, then BeamNG. Spawn **NG64 → Mario** from the vehicle selector.
+Run **`NG64-Setup.exe`** (no admin rights needed). It asks for your Super Mario 64 (US) ROM (any file name;
+`.z64`, `.v64` and `.n64` dumps all work, and it checks it really is that game and region) and for BeamNG's mods
+folder, which it finds for you (the game's `startup.ini` user folder if you've moved it, otherwise
+`%LOCALAPPDATA%\BeamNG\BeamNG.drive\current\mods`). Then just start BeamNG and spawn **NG64 → Mario** from the
+vehicle selector.
+
+What it sets up:
+- the helper and a copy of your ROM in `%LOCALAPPDATA%\NG64`, and `ng64.zip` in the mods folder;
+- a hidden standby process (`ng64helper.exe --watch`) that starts with Windows. A BeamNG mod can't start programs
+  itself, so this does it: when BeamNG starts, it starts the helper (no window), and the helper closes with the game.
+  If it isn't running, start **NG64** from the Start menu;
+- Start menu entries, and an uninstaller in Windows' installed apps (it removes all of the above).
+
+By hand instead: put `ng64.zip` in the mods folder, and `ng64helper.exe` anywhere with your ROM next to it (or its
+path in `rom.txt`, or `--rom <path>`). Start the helper before or after the game; it exits when the game closes.
 
 **Multiplayer (BeamMP):** put `ng64.zip` in the server's `Resources/Client/` and the `beammp_server_plugin`
-folder as `Resources/Server/NG64/`. Every player needs the helper running.
+folder as `Resources/Server/NG64/` (the installer also puts a copy in `%LOCALAPPDATA%\NG64\beammp_server_plugin`).
+Every player needs NG64 installed.
 
 ## Controls
 
@@ -162,20 +173,28 @@ when its window has focus, so the controller works there too. If it still doesn'
 
 ## Legal / licensing note: read before distributing
 
-The mod's Lua, the helper's own C code and the server plugin are original to this project. However, libsm64
-**compiles Mario's model and geometry data** (`src/decomp/mario/geo.inc.c` / `model.inc.c`, downloaded from the
-SM64 decompilation by libsm64's own `import-mario-geo.py`) **into the helper binary**. That data comes from the
-original game. This is the same situation as libsm64 itself and sm64-san-andreas, but it means a built
-`ng64helper.exe` is not purely "open-source code with no copyrighted material". Those generated files are
-git-ignored here and never committed. See the open question in the handoff notes about loading the model from
-the user's ROM at runtime instead.
+The mod's Lua, the helper's own C code, the installer and the server plugin are original to this project, and
+nothing from the game ships with NG64: everything Nintendo-made is read at runtime from the player's own ROM -
+Mario's model (skeleton, display lists, vertices, lights), textures, animations, HUD graphics and music. Only where
+those are in the US ROM is written down.
+
+libsm64 normally downloads Mario's model from the SM64 decompilation (`import-mario-geo.py`: `geo.inc.c`,
+`model.inc.c`) and compiles it in. NG64 builds it without them (`helper/patches/libsm64-rommodel.patch`;
+`build.sh` also deletes any downloaded copies) and translates the model from the ROM instead
+(`helper/src/mario_rom_*.c`). Before the switch it was checked to be identical to libsm64's compiled-in version
+(17 geo layouts, 506 display lists, 14,984 vertices).
+
+libsm64 itself (CC0) is still built from the decompilation's reverse-engineered game code, as every libsm64
+project is.
 
 ## Building
 
-Needs MSYS2 with MinGW-w64 gcc (`C:\msys64`), and libsm64's source in `libsm64-master/` (not committed).
+Needs MSYS2 with MinGW-w64 gcc (`C:\msys64`), libsm64's source in `libsm64-master/` (not committed), and Inno
+Setup 6 for the installer (`winget install JRSoftware.InnoSetup`; `installer/ng64.iss`). Silent install, e.g. for
+testing: `NG64-Setup.exe /VERYSILENT /ROM=<rom path> [/MODSDIR=<mods folder>]`.
 
 ```bash
-./package.sh          # builds helper + dist/ng64.zip + dist/NG64/
+./package.sh          # builds helper + dist/ng64.zip + dist/NG64/ + dist/NG64-Setup.exe
 ```
 
 ## Tests

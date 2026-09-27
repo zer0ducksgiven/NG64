@@ -22,6 +22,7 @@ int png_write_rgba(const char *path, const uint8_t *rgba, int w, int h);
 int ng64_audio_start(const uint8_t *rom);
 int ng64_hud_extract(const uint8_t *rom, size_t romLen);
 int ng64_load_mario_from_rom(const uint8_t *rom, size_t romLen);
+int ng64_rom_normalize(uint8_t *rom, size_t len);
 int ng64_single_instance(int port);
 void ng64_attach_game(DWORD pid);
 int ng64_game_closed(void);
@@ -1421,7 +1422,7 @@ static uint8_t *load_file(const char *path, size_t *outLen);
 static int find_sm64_rom(const char *dir, char *out, size_t outSize)
 {
     char pattern[MAX_PATH];
-    snprintf(pattern, sizeof(pattern), "%s\\*.z64", dir);
+    snprintf(pattern, sizeof(pattern), "%s\\*.*64", dir);   // .z64, .v64, .n64
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA(pattern, &fd);
     if (h == INVALID_HANDLE_VALUE) return 0;
@@ -1431,6 +1432,7 @@ static int find_sm64_rom(const char *dir, char *out, size_t outSize)
         snprintf(path, sizeof(path), "%s\\%s", dir, fd.cFileName);
         size_t len = 0;
         uint8_t *rom = load_file(path, &len);
+        if (rom) ng64_rom_normalize(rom, len);   // .v64 / .n64 byte orders too
         if (rom && is_sm64_us(rom, len)) { snprintf(out, outSize, "%s", path); ok = 1; }
         free(rom);
     } while (!ok && FindNextFileA(h, &fd));
@@ -1716,6 +1718,7 @@ int main(int argc, char **argv)
         MessageBoxA(NULL, "NG64 helper could not find your Super Mario 64 (US) ROM.\n\nPut your .z64 ROM next to ng64helper.exe (any file name), or put its full path in rom.txt.", "NG64", MB_ICONERROR);
         return 1;
     }
+    ng64_rom_normalize(rom, romLen);   // a .v64 or .n64 dump works too
     if (romLen != 8388608 || rom[0] != 0x80 || rom[1] != 0x37) {
         logf_("ERROR: '%s' is not a big-endian (.z64) 8 MB SM64 ROM", romPath);
         MessageBoxA(NULL, "That file is not a Super Mario 64 US .z64 ROM (8 MB, big-endian).", "NG64", MB_ICONERROR);
