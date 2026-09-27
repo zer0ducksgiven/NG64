@@ -388,11 +388,14 @@ end
 -- Whether the level has a terrain at all, checked once per level. On a level without one (a map built entirely from
 -- meshes, like an SM64 castle grounds port) every getTerrainHeight call still costs ~0.16 ms and returns nothing:
 -- 700 of them a frame froze the game for ~100 ms, four frames in a row, every 5 m Mario moved.
-local terrainLevel, levelHasTerrain
+-- A "no terrain" answer is only trusted for a couple of seconds: asked while a big level is still streaming in, it
+-- would otherwise leave Mario with no ground for the whole session.
+local terrainLevel, levelHasTerrain, terrainCheckedAt
 local function hasTerrain()
   local level = getMissionFilename and getMissionFilename() or ""
-  if terrainLevel ~= level then
-    terrainLevel = level
+  local now = os.clock()
+  if terrainLevel ~= level or (not levelHasTerrain and now - (terrainCheckedAt or 0) > 2) then
+    terrainLevel, terrainCheckedAt = level, now
     levelHasTerrain = #(scenetree.findClassObjects("TerrainBlock") or {}) > 0
   end
   return levelHasTerrain
@@ -1066,6 +1069,19 @@ function fixes.tellTraffic(pos, f)
   end
 end
 
+-- Last resort: Mario more than 2 m under the terrain surface (fell through before the ground under him was loaded)
+-- goes back on top of it. Checked once a second.
+function fixes.checkUnderTerrain(pos)
+  if simTime - (fixes.terrainCheckAt or -10) < 1 then return end
+  fixes.terrainCheckAt = simTime
+  if not (hasTerrain() and core_terrain and core_terrain.getTerrainHeight) then return end
+  local h = core_terrain.getTerrainHeight(vec3(pos.x, pos.y, pos.z))
+  if h and h == h and h > -1e5 and pos.z < h - 2 then
+    log("W", logTag, string.format("mario was %.1f m under the terrain at %.1f %.1f: put back on top", h - pos.z, pos.x, pos.y))
+    M.teleport(pos.x, pos.y, h + 0.5)
+  end
+end
+
 local lastMaterialCheck
 local function onUpdate(dtReal, dtSim, dtRaw)
   noteFrame()
@@ -1153,6 +1169,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     prof("vehicles")
     checkVehicleHurt(pos, lastLocalFrame.vel, dt)
     fixes.tellTraffic(pos, lastLocalFrame)
+    fixes.checkUnderTerrain(pos)
     sendMpState(dt)
     if controlled then applyCamera() end
     prof("camera")

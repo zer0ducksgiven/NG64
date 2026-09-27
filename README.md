@@ -86,9 +86,13 @@ Input off for BeamNG.
 | C buttons (camera) | Right stick | Arrow keys |
 | Camera zoom | RB / LB | — |
 | Pick up / throw | Y | E |
-| Music on / off | Back (View) | M |
+| Music on / off | Back (View), tap | M |
+| Next / previous song | Hold Back + RB / LB | ] / [ |
 
 - Controls only work while the BeamNG window is in front.
+- While you're Mario, BeamNG's big map (normally Back / M) is switched off, so the music keys don't open it.
+- **Music:** SM64's songs, from your ROM. All 34 can be cycled through; the current one shows on screen.
+- **Traffic** sees Mario: AI cars slow down or steer round him instead of running him over.
 - **Switching vehicles:** TAB to another vehicle leaves Mario standing where he is; switch back to play him again.
   Replacing him in the vehicle selector removes him.
 - **HUD:** while you're Mario, the screen shows SM64's HUD. The power meter appears when he's hurt. You have 4

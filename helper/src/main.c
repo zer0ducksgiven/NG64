@@ -1235,6 +1235,39 @@ static void carry_update(Mario *m, const Pad *pad)
     }
 
     if (sm64_mario_is_holding(m->id)) {
+        {
+            // diagnostics: a walking action (ACT_FLAG_MOVING) with next to no movement for a second is logged with
+            // what's around him, to find out what he's walking into (reported: "walks on the spot" while carrying)
+            static float lastPos[3];
+            static DWORD since, loggedAt;
+            DWORD now = GetTickCount();
+            float dx = st->position[0] - lastPos[0], dz = st->position[2] - lastPos[2];
+            if (!(st->action & 0x400) || dx * dx + dz * dz > 18 * 18) {   // not walking, or moved > ~15 cm
+                memcpy(lastPos, st->position, 12);
+                since = now;
+            } else if (now - since > 1000 && now - loggedAt > 3000) {
+                loggedAt = now;
+                float wx = st->position[0], wy = st->position[1], wz = st->position[2];
+                int walls = sm64_surface_find_wall_collision(&wx, &wy, &wz, 60, 50);
+                struct SM64SurfaceCollisionData *floor = NULL;
+                float fy = sm64_surface_find_floor(st->position[0], st->position[1] + 50, st->position[2], &floor);
+                float nearest = 1e9f;
+                uint32_t nearId = 0;
+                for (int i = 0; i < MAX_VEH; i++) {
+                    if (!s_veh[i].used) continue;
+                    float p[3];
+                    sm2bng(st->position, p);
+                    float ddx = p[0] - s_veh[i].orgB[0], ddy = p[1] - s_veh[i].orgB[1];
+                    float d = sqrtf(ddx * ddx + ddy * ddy);
+                    if (d < nearest) { nearest = d; nearId = s_veh[i].vehId; }
+                }
+                logf_("carrying but not moving for %.1f s: action %08x, forward speed %.1f, %d wall(s) against him, "
+                      "floor %.0f below (normal y %.2f), nearest vehicle %u at %.1f m (held %u, %s)",
+                      (now - since) / 1000.0f, (unsigned)st->action, st->forwardVelocity, walls,
+                      st->position[1] - fy, floor ? floor->normal.y : -1.0f, nearId, nearest, s_carry.vehId,
+                      s_carry.heavy ? "heavy" : "light");
+            }
+        }
         if (yEdge) s_injectB = 1;   // Y again throws, same as B
         // SM64 has no put-down for heavy things (B throws, Z does nothing); Z lets go of a car here. Light pieces
         // keep SM64's own put-down.

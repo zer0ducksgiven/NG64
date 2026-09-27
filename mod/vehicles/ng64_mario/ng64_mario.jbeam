@@ -20,13 +20,20 @@
         ["ng_back", 0, 0.3, 0.3],
         ["ng_left", 0.3, 0, 0.3],
         ["ng_up", 0, 0, 0.6],
+        //extent only: the anchor's node box is what AI traffic takes as Mario's size (no collision)
+        ["ng_ext_l", 0.4, 0, 0.0],
+        ["ng_ext_r", -0.4, 0, 0.0],
+        ["ng_ext_f", 0, -0.4, 0.0],
+        ["ng_ext_b", 0, 0.4, 0.0],
+        ["ng_ext_t", 0, 0, 1.6],
         {"group": ""}
     ],
     "beams": [
         ["id1:", "id2:"],
         {"beamSpring": 1000000, "beamDamp": 100, "beamDeform": "FLT_MAX", "beamStrength": "FLT_MAX"},
         ["ng_ref", "ng_back"], ["ng_ref", "ng_left"], ["ng_ref", "ng_up"],
-        ["ng_back", "ng_left"], ["ng_back", "ng_up"], ["ng_left", "ng_up"]
+        ["ng_back", "ng_left"], ["ng_back", "ng_up"], ["ng_left", "ng_up"],
+        ["ng_ref", "ng_ext_l"], ["ng_ref", "ng_ext_r"], ["ng_ref", "ng_ext_f"], ["ng_ref", "ng_ext_b"], ["ng_ref", "ng_ext_t"]
     ]
 }
 }
