@@ -21,6 +21,8 @@
 int png_write_rgba(const char *path, const uint8_t *rgba, int w, int h);
 int ng64_audio_start(const uint8_t *rom);
 int ng64_hud_extract(const uint8_t *rom, size_t romLen);
+int ng64_load_mario_from_rom(const uint8_t *rom, size_t romLen);
+const char *ng64_mario_rom_error(void);
 int ng64_hud_write(const char *userPath);
 static int s_hudOk;
 void ng64_audio_stop(void);
@@ -1709,6 +1711,12 @@ int main(int argc, char **argv)
     if (verbose) sm64_register_debug_print_function(debug_print);
     s_marioTex = malloc(4 * SM64_TEXTURE_WIDTH * SM64_TEXTURE_HEIGHT);
     sm64_global_init(rom, s_marioTex);
+    // Mario's model (skeleton, body parts) comes from the ROM too: none of it is built into the helper
+    if (!ng64_load_mario_from_rom(rom, romLen)) {
+        logf_("ERROR: could not read Mario's model from '%s' (%s)", romPath, ng64_mario_rom_error());
+        MessageBoxA(NULL, "NG64 helper could not read Mario's model from your ROM.\n\nIt needs the US version of Super Mario 64 (.z64).", "NG64", MB_ICONERROR);
+        return 1;
+    }
     if (audio) {
         s_audioOk = ng64_audio_start(rom);
         if (!s_audioOk) logf_("audio unavailable - continuing without sound");

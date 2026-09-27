@@ -1,0 +1,58 @@
+--- a/Makefile
++++ b/Makefile
+@@ -26,7 +26,9 @@
+ LIB_H_FILE := $(DIST_DIR)/include/libsm64.h
+ TEST_FILE  := run-test
+ 
+-C_IMPORTED := src/decomp/mario/geo.inc.c src/decomp/mario/model.inc.c
++# NG64: Mario's model is read from the player's ROM at runtime (helper/src/mario_rom_*.c), not downloaded and
++# compiled in from the SM64 decompilation
++C_IMPORTED :=
+ H_IMPORTED := $(C_IMPORTED:.c=.h)
+ IMPORTED   := $(C_IMPORTED) $(H_IMPORTED)
+ 
+@@ -53,9 +55,6 @@
+ 
+ DUMMY := $(shell mkdir -p $(ALL_DIRS) build/test build/test/gl33core build/test/gl20 src/decomp/mario $(DIST_DIR)/include)
+ 
+-$(filter-out src/decomp/mario/geo.inc.c,$(IMPORTED)): src/decomp/mario/geo.inc.c
+-src/decomp/mario/geo.inc.c: ./import-mario-geo.py
+-	./import-mario-geo.py
+ 
+ ifdef MACOS_BUILD
+ $(BUILD_DIR)/%_x86_64.o: %.c $(IMPORTED)
+--- a/src/libsm64.c
++++ b/src/libsm64.c
+@@ -25,7 +25,9 @@
+ #include "decomp/engine/graph_node.h"
+ #include "decomp/engine/geo_layout.h"
+ #include "decomp/game/rendering_graph_node.h"
+-#include "decomp/mario/geo.inc.h"
++// NG64: Mario's geo layout is read from the ROM at runtime (not the decomp's generated geo.inc.c); set before
++// the first sm64_mario_create
++void *mario_geo_ptr;
+ #include "decomp/game/platform_displacement.h"
+ #include "decomp/game/sound_init.h"
+ 
+--- a/src/decomp/game/behavior_actions.h
++++ b/src/decomp/game/behavior_actions.h
+@@ -1,6 +1,6 @@
+ #pragma once
+ 
+ #include "../include/types.h"
+-#include "../mario/model.inc.h"
++#include "../include/PR/gbi.h"   // NG64: was ../mario/model.inc.h (Mario's model now comes from the ROM)
+ 
+ extern Gfx *geo_move_mario_part_from_parent(s32 run, UNUSED struct GraphNode *node, Mat4 mtx);
+\ No newline at end of file
+--- a/src/decomp/game/rendering_graph_node.c
++++ b/src/decomp/game/rendering_graph_node.c
+@@ -18,7 +18,7 @@
+ 
+ 
+ 
+-#include "../mario/model.inc.h"
++#include "../include/PR/gbi.h"   // NG64: was ../mario/model.inc.h (Mario's model now comes from the ROM)
+ 
+ 
+ // PATCH
