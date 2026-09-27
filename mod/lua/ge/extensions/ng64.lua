@@ -1006,7 +1006,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     sendHello()
     if active and not warnedNoHelper and simTime - lastHelloTime > 0.5 then
       warnedNoHelper = true
-      guihooks.trigger("toastrMsg", { type = "warning", title = "NG64", msg = "Start ng64helper.exe to play as Mario." })
+      guihooks.trigger("toastrMsg", { type = "warning", title = "NG64", msg = "The NG64 helper isn't running. Start NG64 from the Start menu (or run the NG64 installer again) to play as Mario." })
     end
   end
 

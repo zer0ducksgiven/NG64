@@ -21,7 +21,7 @@ make lib CC=gcc -j8 >/dev/null
 cd '$HERE' && mkdir -p dist
 gcc -O2 -Wall -Wno-unused-function -DGBI_FLOATS -DSM64_LIB_EXPORT -DVERSION_US -DNO_SEGMENTED_MEMORY \
   -I../libsm64-master/src -I../libsm64-master/src/decomp/include -o dist/ng64helper.exe \
-  src/main.c src/png.c src/audio.c src/hud.c src/mario_rom_geo.c src/mario_rom_dl.c \$(ls ../libsm64-master/build/src/*.o ../libsm64-master/build/src/decomp/*/*.o ../libsm64-master/build/src/decomp/*.o ../libsm64-master/build/src/decomp/*/*/*.o 2>/dev/null) \
-  -static -lws2_32 -lwinmm -lm
+  src/main.c src/png.c src/audio.c src/hud.c src/mario_rom_geo.c src/mario_rom_dl.c src/lifecycle.c \$(ls ../libsm64-master/build/src/*.o ../libsm64-master/build/src/decomp/*/*.o ../libsm64-master/build/src/decomp/*.o ../libsm64-master/build/src/decomp/*/*/*.o 2>/dev/null) \
+  -static -mwindows -lws2_32 -lwinmm -lm
 "
 echo built "$HERE/dist/ng64helper.exe"

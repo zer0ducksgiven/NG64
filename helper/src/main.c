@@ -22,6 +22,11 @@ int png_write_rgba(const char *path, const uint8_t *rgba, int w, int h);
 int ng64_audio_start(const uint8_t *rom);
 int ng64_hud_extract(const uint8_t *rom, size_t romLen);
 int ng64_load_mario_from_rom(const uint8_t *rom, size_t romLen);
+int ng64_single_instance(int port);
+void ng64_attach_game(DWORD pid);
+int ng64_game_closed(void);
+DWORD ng64_game_pid(void);
+int ng64_run_watcher(const char *exePath, const char *exeDir);
 const char *ng64_mario_rom_error(void);
 int ng64_hud_write(const char *userPath);
 static int s_hudOk;
@@ -1653,8 +1658,11 @@ int main(int argc, char **argv)
 {
     const char *romPath = NULL;
     int audio = 1, port = NG64_PORT, verbose = 0;
-    char exeDir[MAX_PATH];
+    char exeDir[MAX_PATH], exePath[MAX_PATH];
+    int watch = 0;
+    DWORD parentPid = 0;
     GetModuleFileNameA(NULL, exeDir, sizeof(exeDir));
+    snprintf(exePath, sizeof(exePath), "%s", exeDir);
     char *slash = strrchr(exeDir, '\\');
     if (slash) *slash = 0;
 
@@ -1664,7 +1672,13 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ignore-focus")) s_ignoreFocus = 1;
         else if (!strcmp(argv[i], "--verbose")) verbose = 1;
+        else if (!strcmp(argv[i], "--watch")) watch = 1;                  // standby: start a helper whenever BeamNG runs
+        else if (!strcmp(argv[i], "--parent") && i + 1 < argc) parentPid = (DWORD)strtoul(argv[++i], NULL, 10);
     }
+    if (watch) return ng64_run_watcher(exePath, exeDir);
+    // one helper per port (another would only fight it for the socket), checked before its log is touched
+    if (!ng64_single_instance(port)) return 0;
+    ng64_attach_game(parentPid);   // exits with this game; started by hand, it follows whichever game runs first
 
     char logPath[MAX_PATH];
     snprintf(logPath, sizeof(logPath), "%s\\ng64helper.log", exeDir);
@@ -1756,6 +1770,11 @@ int main(int argc, char **argv)
     uint8_t pkt[65536];
 
     for (;;) {
+        if (ng64_game_closed()) {
+            logf_("BeamNG (pid %lu) closed: helper exiting", (unsigned long)ng64_game_pid());
+            if (s_audioOk) ng64_audio_stop();
+            return 0;
+        }
         LARGE_INTEGER drain0, drain1;
         int drainCount = 0, drainTypes[128] = { 0 };
         QueryPerformanceCounter(&drain0);
