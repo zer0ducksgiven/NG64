@@ -796,13 +796,19 @@ end
 
 local restoreCameraUntil = -1   -- after Mario goes, keep handing the camera back to the game for a moment
 
--- BeamNG binds its big map to the pad's Back button and the M key - the same as NG64's music toggle. It's
--- switched off while the player is Mario (setControlled / deactivate). (One table, "fixes", for these helpers:
--- this file is at Lua's limit of 200 top-level locals.)
+-- BeamNG's own bindings on the keys and buttons Mario uses are switched off while the player is Mario
+-- (setControlled / deactivate): its big map is on Back / M (the music toggle), J pauses, E opens the radial menu,
+-- WASD moves the free camera Mario's camera runs in, Space / arrows are the parking brake, throttle and steering.
+-- (One table, "fixes", for these helpers: this file is at Lua's limit of 200 top-level locals.)
 local fixes = {}
+fixes.marioBlockedActions = {
+  "toggleBigMap", "pause", "toggleRadialMenuMulti", "parkingbrake", "steadycamJump",
+  "moveforward", "movebackward", "moveleft", "moveright",
+  "accelerate", "brake", "steer_left", "steer_right",
+}
 function fixes.blockBigMap(block)
   if not core_input_actionFilter then return end
-  core_input_actionFilter.setGroup("ng64Mario", { "toggleBigMap" })
+  core_input_actionFilter.setGroup("ng64Mario", fixes.marioBlockedActions)
   core_input_actionFilter.addAction(0, "ng64Mario", block)
 end
 
