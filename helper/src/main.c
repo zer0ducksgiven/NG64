@@ -1259,6 +1259,18 @@ static void carry_update(Mario *m, const Pad *pad)
 
     if (sm64_mario_is_holding(m->id)) {
         {
+            // trace: once a second while carrying, where he is and what he's doing, so a stuck carry shows up in the
+            // log even when it doesn't match the "not moving" check below
+            static DWORD traceAt;
+            DWORD t = GetTickCount();
+            if (t - traceAt >= 1000) {
+                traceAt = t;
+                logf_("carry: pos %.0f %.0f %.0f, action %08x, forward speed %.1f, vel %.1f %.1f %.1f, stick %.2f %.2f",
+                      st->position[0], st->position[1], st->position[2], (unsigned)st->action, st->forwardVelocity,
+                      st->velocity[0], st->velocity[1], st->velocity[2], pad->lx, pad->ly);
+            }
+        }
+        {
             // diagnostics: a walking action (ACT_FLAG_MOVING) with next to no movement for a second is logged with
             // what's around him, to find out what he's walking into (reported: "walks on the spot" while carrying)
             static float lastPos[3];
@@ -1856,7 +1868,7 @@ int main(int argc, char **argv)
     {
         // keep the previous run's log: the watcher starts a new helper every time the game starts
         char oldPath[MAX_PATH];
-        snprintf(oldPath, sizeof(oldPath), "%s\ng64helper.old.log", exeDir);
+        snprintf(oldPath, sizeof(oldPath), "%s\\ng64helper.old.log", exeDir);
         MoveFileExA(logPath, oldPath, MOVEFILE_REPLACE_EXISTING);
     }
     s_log = fopen(logPath, "w");
