@@ -15,7 +15,7 @@ def check(cond, msg):
     if not cond: fails.append(msg)
 
 try:
-    s.sendto(b"H" + struct.pack("<H", 9) + user.encode(), dst)
+    s.sendto(b"H" + struct.pack("<H", 10) + user.encode(), dst)
     d, _ = s.recvfrom(65536)
     check(d[0:1] == b"W" and d[1] == 1, "welcome ok")
     atlas = d[2:].split(b"\0")[1].decode()
@@ -117,6 +117,48 @@ try:
     time.sleep(0.3)
     f = frames(1.5)
     check(abs(f[-1][4] - 10.0) < 0.2, "dropping every cell removes the floor (back on the ground z=%.3f)" % f[-1][4])
+
+    # a level's own SM64 surfaces (MSG_SURFACES): typed triangles, kept until replaced or cleared
+    def surfaces(tris):
+        if not tris:
+            s.sendto(b"G" + struct.pack("<HHH", 0, 0, 0), dst)
+            return
+        s.sendto(b"G" + struct.pack("<HHH", 0, 1, len(tris)) +
+                 b"".join(struct.pack("<Hh9f", typ, 0, *v) for typ, v in tris), dst)
+    surfaces([(0, t) for t in floor])
+    time.sleep(0.3)
+    s.sendto(b"M" + struct.pack("<fff", 0, 0, 12.5), dst)
+    f = frames(1.2)
+    check(abs(f[-1][4] - 12.0) < 0.2, "stands on the level's own SM64 surfaces z=%.3f" % f[-1][4])
+    # a 20 degree slope: SM64 slides Mario off a very slippery one (0x13) and lets him stand on a default one
+    rise = 6 * math.tan(math.radians(20))
+    slope = [(-3, -3, 11, 3, -3, 11 + rise, 3, 3, 11 + rise), (-3, -3, 11, 3, 3, 11 + rise, -3, 3, 11)]
+    drift = {}
+    for typ in (0x00, 0x13):
+        surfaces([(typ, t) for t in slope])
+        time.sleep(0.3)
+        s.sendto(b"M" + struct.pack("<fff", 0, 0, 11 + rise / 2 + 0.5), dst)
+        frames(0.6)
+        f = frames(1.0)
+        drift[typ] = abs(f[-1][2] - f[0][2]) + abs(f[-1][3] - f[0][3])
+    check(drift[0x00] < 0.3 and drift[0x13] > 0.5, "surface types reach SM64: default slope drift %.2f m, very slippery %.2f m" % (drift[0x00], drift[0x13]))
+    surfaces([])
+    time.sleep(0.3)
+    s.sendto(b"M" + struct.pack("<fff", 0, 0, 10.5), dst)
+    f = frames(1.2)
+    check(abs(f[-1][4] - 10.0) < 0.2, "clearing the level surfaces removes them z=%.3f" % f[-1][4])
+
+    # water boxes (MSG_WATER): below the surface of the box he's in, Mario swims
+    s.sendto(b"J" + bytes([1]) + struct.pack("<5f", -5, -5, 5, 5, 12.0), dst)
+    s.sendto(b"M" + struct.pack("<fff", 0, 0, 10.5), dst)
+    f = frames(1.5)
+    act = f[-1][10]
+    check((act & 0x1C0) == 0xC0, "in a water box Mario swims (action 0x%x)" % act)
+    s.sendto(b"J" + bytes([0]), dst)
+    s.sendto(b"M" + struct.pack("<fff", 0, 0, 10.5), dst)
+    f = frames(1.5)
+    act = f[-1][10]
+    check((act & 0x1C0) != 0xC0 and abs(f[-1][4] - 10.0) < 0.2, "without water he's back on dry ground (action 0x%x)" % act)
 
     # run east into the 3 m block: must stop at the wall, not climb it
     s.sendto(b"M" + struct.pack("<fff", 0, 0, 10.2), dst)

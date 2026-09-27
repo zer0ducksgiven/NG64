@@ -342,17 +342,92 @@ static void heightfield_surfaces(const float *h, int nx, int ny, float ox, float
 
 // The static world is two parts: terrain (a heightfield, sampled) and the map's objects (their real collision
 // triangles, streamed in by the mod). Either one changing reloads both.
-static struct SM64Surface *s_terrainSurf, *s_meshSurf;
-static int s_terrainCount, s_meshCount;
+static struct SM64Surface *s_terrainSurf, *s_meshSurf, *s_levelSurf;
+static int s_terrainCount, s_meshCount, s_levelCount;
 
 static void reload_static(void)
 {
-    int total = s_terrainCount + s_meshCount;
+    int total = s_terrainCount + s_meshCount + s_levelCount;
     struct SM64Surface *all = malloc(sizeof(struct SM64Surface) * (total ? total : 1));
     if (s_terrainCount) memcpy(all, s_terrainSurf, sizeof(struct SM64Surface) * s_terrainCount);
     if (s_meshCount) memcpy(all + s_terrainCount, s_meshSurf, sizeof(struct SM64Surface) * s_meshCount);
+    if (s_levelCount) memcpy(all + s_terrainCount + s_meshCount, s_levelSurf, sizeof(struct SM64Surface) * s_levelCount);
     sm64_static_surfaces_load(all, total);
     free(all);
+}
+
+// MSG_SURFACES: a level built from SM64 (sm64_surfaces.json) sends its original surfaces, types and all, so Mario
+// slides on the slippery roof and gets pushed by currents. They stay until the next set (or an empty one) arrives.
+static struct SM64Surface *s_levelPend;
+static int s_levelPendCount, s_levelPendCap;
+
+static void load_level_surfaces(const uint8_t *p, int len)
+{
+    if (len < 6) return;
+    uint16_t chunk, chunks, count;
+    memcpy(&chunk, p, 2); memcpy(&chunks, p + 2, 2); memcpy(&count, p + 4, 2);
+    if (chunks == 0) {
+        free(s_levelSurf); s_levelSurf = NULL; s_levelCount = 0;
+        reload_static();
+        return;
+    }
+    if (len < 6 + (int)count * 40) return;
+    if (chunk == 0) s_levelPendCount = 0;
+    if (s_levelPendCount + count > s_levelPendCap) {
+        s_levelPendCap = (s_levelPendCount + count) * 2;
+        s_levelPend = realloc(s_levelPend, sizeof(struct SM64Surface) * s_levelPendCap);
+    }
+    for (int i = 0; i < count; i++) {
+        const uint8_t *t = p + 6 + i * 40;
+        struct SM64Surface *s = &s_levelPend[s_levelPendCount++];
+        memset(s, 0, sizeof(*s));
+        uint16_t type; int16_t force;
+        memcpy(&type, t, 2); memcpy(&force, t + 2, 2);
+        s->type = (int16_t)type;
+        s->force = force;
+        float v[9], sv[3];
+        memcpy(v, t + 4, 36);
+        for (int k = 0; k < 3; k++) {       // the original winding: bng2sm is a rotation, so it keeps facing
+            bng2sm(v + k * 3, sv);
+            for (int c = 0; c < 3; c++) s->vertices[k][c] = (int32_t)lroundf(sv[c]);
+        }
+    }
+    if (chunk + 1 == chunks) {
+        free(s_levelSurf);
+        s_levelSurf = malloc(sizeof(struct SM64Surface) * (s_levelPendCount ? s_levelPendCount : 1));
+        memcpy(s_levelSurf, s_levelPend, sizeof(struct SM64Surface) * s_levelPendCount);
+        s_levelCount = s_levelPendCount;
+        reload_static();
+        logf_("level surfaces: %d with their SM64 types", s_levelCount);
+    }
+}
+
+// MSG_WATER: the level's water boxes; Mario swims below the top of the box he's in
+#define MAX_WATER 32
+static float s_water[MAX_WATER][5];   // x0, y0, x1, y1, z (bng)
+static int s_waterCount;
+
+static void load_water(const uint8_t *p, int len)
+{
+    if (len < 1) return;
+    int n = p[0];
+    if (n > MAX_WATER) n = MAX_WATER;
+    if (len < 1 + n * 20) return;
+    memcpy(s_water, p + 1, (size_t)n * 20);
+    s_waterCount = n;
+    logf_("water boxes: %d", n);
+}
+
+// water level (sm64 units) at a position in sm64 units; SM64's "no water" below everything otherwise
+static int water_level_at(const float *sp)
+{
+    float bx = sp[0] * S, by = -sp[2] * S;
+    float best = -10000.0f;
+    for (int i = 0; i < s_waterCount; i++) {
+        const float *w = s_water[i];
+        if (bx >= w[0] && bx <= w[2] && by >= w[1] && by <= w[3] && w[4] / S > best) best = w[4] / S;
+    }
+    return (int)lroundf(best);
 }
 
 static void load_terrain(const uint8_t *p, int len)
@@ -942,7 +1017,7 @@ static void check_attacks(Mario *m)
 typedef DWORD(WINAPI *XInputGetStateFn)(DWORD, XINPUT_STATE *);
 static XInputGetStateFn s_xinputGetState;
 
-typedef struct { float lx, ly, rx, ry; int a, b, z, zoomIn, zoomOut, y, music; } Pad;
+typedef struct { float lx, ly, rx, ry; int a, b, z, zoomIn, zoomOut, y, music, songNext, songPrev; } Pad;
 
 static float deadzone(SHORT v, SHORT dz)
 {
@@ -991,6 +1066,8 @@ static void read_pad(Pad *p)
     if (KEY('K')) p->z = 1;
     if (KEY('E')) p->y = 1;
     if (KEY('M')) p->music = 1;
+    if (KEY(VK_OEM_6)) p->songNext = 1;   // ]
+    if (KEY(VK_OEM_4)) p->songPrev = 1;   // [
     if (KEY(VK_LEFT)) p->rx = -1;
     if (KEY(VK_RIGHT)) p->rx = 1;
     if (KEY(VK_UP)) p->ry = 1;
@@ -1009,8 +1086,22 @@ static int s_injectB, s_prevY, s_scriptY, s_prevZ, s_effZ;
 static int s_inputEnabled = 1;
 
 // ---- music: SM64's own, from the ROM, while you're playing as Mario (Back / M toggles) -------------------------------
-#define NG64_MUSIC_SEQ 0x03   // SEQ_LEVEL_GRASS: Bob-omb Battlefield
-static int s_audioOk, s_musicOn = 1, s_musicPlaying, s_prevMusic, s_scriptMusic;
+// SM64's music, in its sequence order (seq_ids.h), for cycling through; starts on Bob-omb Battlefield
+static const struct { uint8_t seq; const char *name; } s_songs[] = {
+    { 0x03, "Bob-omb Battlefield" }, { 0x02, "Title Theme" }, { 0x04, "Inside the Castle Walls" },
+    { 0x05, "Dire, Dire Docks" }, { 0x06, "Lethal Lava Land" }, { 0x07, "Koopa's Theme" },
+    { 0x08, "Snow Mountain" }, { 0x09, "Slider" }, { 0x0A, "Haunted House" }, { 0x0B, "Piranha Plant's Lullaby" },
+    { 0x0C, "Cave Dungeon" }, { 0x0D, "Star Select" }, { 0x0E, "Powerful Mario" }, { 0x0F, "Metallic Mario" },
+    { 0x10, "Koopa's Message" }, { 0x11, "Koopa's Road" }, { 0x12, "High Score" }, { 0x13, "Merry-Go-Round" },
+    { 0x14, "Race Fanfare" }, { 0x15, "Star Appears" }, { 0x16, "Stage Boss" }, { 0x17, "Key Get" },
+    { 0x18, "Endless Stairs" }, { 0x19, "Ultimate Koopa" }, { 0x1A, "Staff Roll" }, { 0x1B, "Puzzle Solved" },
+    { 0x1C, "Toad's Message" }, { 0x1D, "Peach's Message" }, { 0x1E, "Opening" }, { 0x1F, "Ultimate Victory" },
+    { 0x20, "Ending" }, { 0x21, "File Select" }, { 0x22, "Lakitu" }, { 0x01, "Star Get" },
+};
+#define NUM_SONGS ((int)(sizeof(s_songs) / sizeof(s_songs[0])))
+static int s_song;
+static int s_audioOk, s_musicOn = 1, s_musicPlaying, s_prevMusic, s_scriptMusic, s_scriptSong;
+static int s_musicCombo, s_prevNext, s_prevPrev;
 
 static void send_toast(const char *msg)
 {
@@ -1021,22 +1112,40 @@ static void send_toast(const char *msg)
 
 void ng64_audio_level(double rms) { logf_("audio level %.0f (rms)", rms); }
 
-static void music_update(const Pad *pad)
+// Back (M) toggles the music, on release; held with RB / LB (or ] / [ on the keyboard) it changes song instead.
+// While Back is held the bumpers don't zoom the camera.
+static void music_update(Pad *pad)
 {
-    int press = pad->music || s_scriptMusic;
-    int edge = press && !s_prevMusic;
-    s_prevMusic = press;
-    s_scriptMusic = 0;
-    if (edge && s_inputEnabled) {
+    int held = pad->music || s_scriptMusic;
+    int next = (held && pad->zoomIn) || pad->songNext || s_scriptSong > 0;
+    int prev = (held && pad->zoomOut) || pad->songPrev || s_scriptSong < 0;
+    int step = (next && !s_prevNext) ? 1 : (prev && !s_prevPrev) ? -1 : 0;
+    s_prevNext = next; s_prevPrev = prev;
+    s_scriptSong = 0;
+    if (held) { pad->zoomIn = pad->zoomOut = 0; if (step) s_musicCombo = 1; }
+    if (step && s_inputEnabled) {
+        s_song = (s_song + step + NUM_SONGS) % NUM_SONGS;
+        s_musicOn = 1;
+        s_musicPlaying = 0;   // start the new song below
+        char msg[96];
+        snprintf(msg, sizeof(msg), "Music %d/%d: %s", s_song + 1, NUM_SONGS, s_songs[s_song].name);
+        send_toast(msg);
+        logf_("song %d: %s", s_song + 1, s_songs[s_song].name);
+    }
+    int released = !held && s_prevMusic;
+    if (released && !s_musicCombo && s_inputEnabled) {
         s_musicOn = !s_musicOn;
         send_toast(s_musicOn ? "Music on" : "Music off");
         logf_("music %s", s_musicOn ? "on" : "off");
     }
+    if (!held) s_musicCombo = 0;
+    s_prevMusic = held;
+    s_scriptMusic = 0;
     int want = s_audioOk && s_musicOn && s_inputEnabled && mario_find(0) != NULL;
     if (want && !s_musicPlaying) {
-        sm64_ng64_music_play(NG64_MUSIC_SEQ);
+        sm64_ng64_music_play(s_songs[s_song].seq);
         s_musicPlaying = 1;
-        logf_("music playing (sequence 0x%02x)", NG64_MUSIC_SEQ);
+        logf_("music playing (sequence 0x%02x)", s_songs[s_song].seq);
     } else if (!want && s_musicPlaying) {
         sm64_ng64_music_stop(30);   // one-second fade
         s_musicPlaying = 0;
@@ -1494,6 +1603,8 @@ static void handle_packet(const uint8_t *p, int len)
     case MSG_TERRAIN: load_terrain(p, len); break;
     case MSG_MESH: load_mesh_chunk(p, len); break;
     case MSG_MESH_DROP: drop_mesh_cell(p, len); break;
+    case MSG_SURFACES: load_level_surfaces(p, len); break;
+    case MSG_WATER: load_water(p, len); break;
     case MSG_FLOOR_QUERY: {
         // tests: SM64's floor height under each point, to compare with BeamNG's own raycasts
         if (len < 6) break;
@@ -1617,7 +1728,9 @@ static void handle_packet(const uint8_t *p, int len)
             s_script.frames = fr;
             s_script.absDir = 0;
             if (len >= 22 && (p[21] & 1)) s_scriptY = 1;           // optional trailing u8 flags (tests): 1 = Y,
-            if (len >= 22 && (p[21] & 2)) s_scriptMusic = 1;       // 2 = music toggle
+            if (len >= 22 && (p[21] & 2)) s_scriptMusic = 1;       // 2 = music toggle,
+            if (len >= 22 && (p[21] & 4)) s_scriptSong = 1;        // 4 = next song, 8 = previous
+            if (len >= 22 && (p[21] & 8)) s_scriptSong = -1;
             if (len >= 21) {   // optional world direction (bng x, y) that "stick up" walks along
                 float d[3] = { 0, 0, 0 }, sd[3];
                 memcpy(d, p + 13, 8);
@@ -1857,6 +1970,7 @@ int main(int argc, char **argv)
                 sm64_set_mario_anim_frame(m->id, m->rFrame);
                 in.camLookZ = -1;
             }
+            sm64_set_mario_water_level(m->id, water_level_at(m->state.position));
             sm64_mario_tick(m->id, &in, &m->state, &m->geo);
             if (m->key == 0 && vehicle_push_out(m)) {
                 static DWORD lastPushLog;
@@ -1894,7 +2008,7 @@ int main(int argc, char **argv)
             double ms = (double)(tickEnd.QuadPart - tickStart.QuadPart) * 1000.0 / freq.QuadPart;
             tickMsSum += ms; if (ms > tickMsMax) tickMsMax = ms;
             if (++tickN == 150) {
-                logf_("tick: %.2f ms avg, %.2f ms max (%d static surfaces)", tickMsSum / tickN, tickMsMax, s_terrainCount + s_meshCount);
+                logf_("tick: %.2f ms avg, %.2f ms max (%d static surfaces)", tickMsSum / tickN, tickMsMax, s_terrainCount + s_meshCount + s_levelCount);
                 tickMsSum = tickMsMax = 0; tickN = 0;
             }
         }

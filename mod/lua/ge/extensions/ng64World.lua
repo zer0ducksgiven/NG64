@@ -35,7 +35,8 @@ function M.reset()
   statics, instanceCache, queue, parser, cachedFloats = {}, {}, {}, nil, 0
 end
 
-function M.index()
+-- skip: optional set of shape paths to leave out (a level that sends its own typed SM64 surfaces instead)
+function M.index(skip)
   M.reset()
   local names = scenetree.findClassObjects("TSStatic") or {}
   for _, n in ipairs(names) do
@@ -43,7 +44,7 @@ function M.index()
     if o then
       local ct = o:getField("collisionType", 0)
       local shape = o.shapeName
-      if ct ~= "None" and shape and shape ~= "" then
+      if ct ~= "None" and shape and shape ~= "" and not (skip and skip[daePath(shape)]) then
         local b = o:getWorldBox()
         local m = o:getTransform()
         local mn, mx = b.minExtents, b.maxExtents

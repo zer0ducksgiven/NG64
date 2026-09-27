@@ -11,7 +11,7 @@ local world = require("ge/extensions/ng64World")
 local hud = require("ge/extensions/ng64Hud")
 
 local HELPER_HOST, HELPER_PORT = "127.0.0.1", 47064
-local PROTO_VERSION = 9
+local PROTO_VERSION = 10
 local STUB_MODEL = "ng64_mario"
 
 local GRID_N, GRID_SP = 49, 0.5         -- terrain sample grid around Mario (24 m square)
@@ -642,15 +642,62 @@ local function clearCells()
   sendRaw("Y" .. packU32(0xFFFFFFFF))
 end
 
+-- A level built from Super Mario 64 (the SM64 map port) ships sm64_surfaces.json: its original collision with SM64
+-- surface types (slippery roof, currents...) and water boxes. Those go to the helper as they are, and the shapes
+-- they replace are left out of the generic mesh streaming.
+local levelSurfaces, levelSurfacesSent
+
+local function loadLevelSurfaces(level)
+  levelSurfaces, levelSurfacesSent = nil, false
+  local dir = string.match(level, "^(.*)/[^/]*$")
+  local data = dir and FS:fileExists(dir .. "/sm64_surfaces.json") and jsonReadFile(dir .. "/sm64_surfaces.json")
+  if data and data.format == 1 and data.triangles then
+    levelSurfaces = data
+    log("I", logTag, string.format("level has SM64 surfaces: %d triangles, %d water boxes", #data.triangles, #(data.water or {})))
+  end
+end
+
+local SURF_CHUNK = 190                       -- 40 bytes each: a chunk stays under LuaSocket's 8 KB
+local function sendLevelSurfaces()
+  if not connected then return end
+  levelSurfacesSent = true
+  local tris = levelSurfaces and levelSurfaces.triangles or {}
+  if #tris == 0 then
+    sendRaw("G" .. packU16(0) .. packU16(0) .. packU16(0))
+  else
+    local chunks = math.ceil(#tris / SURF_CHUNK)
+    for k = 0, chunks - 1 do
+      local parts = {}
+      local first, last = k * SURF_CHUNK + 1, math.min(#tris, (k + 1) * SURF_CHUNK)
+      for i = first, last do
+        local t = tris[i]
+        parts[#parts + 1] = packU16(t[1]) .. packI16(t[2]) .. packF(t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11])
+      end
+      sendRaw("G" .. packU16(k) .. packU16(chunks) .. packU16(last - first + 1) .. table.concat(parts))
+    end
+  end
+  local water = levelSurfaces and levelSurfaces.water or {}
+  local w = { string.char(#water) }
+  for _, b in ipairs(water) do w[#w + 1] = packF(b.min[1], b.min[2], b.max[1], b.max[2], b.z) end
+  sendRaw("J" .. table.concat(w))
+end
+
 local function checkLevel()
   local level = getMissionFilename and getMissionFilename() or ""
   if meshLevel ~= level then
     meshLevel = level
     local t0 = os.clock()
-    local n = world.index()
+    loadLevelSurfaces(level)
+    local skip
+    if levelSurfaces and levelSurfaces.replacesShapes then
+      skip = {}
+      for _, sh in ipairs(levelSurfaces.replacesShapes) do skip[sh] = true end
+    end
+    local n = world.index(skip)
     clearCells()
     log("I", logTag, string.format("indexed %d colliding map objects in %.2f s", n, os.clock() - t0))
   end
+  if not levelSurfacesSent then sendLevelSurfaces() end
 end
 
 local PREFETCH_RADIUS, prefetchAt = 120, 0
@@ -746,8 +793,19 @@ end
 
 local restoreCameraUntil = -1   -- after Mario goes, keep handing the camera back to the game for a moment
 
+-- BeamNG binds its big map to the pad's Back button and the M key - the same as NG64's music toggle. It's
+-- switched off while the player is Mario (setControlled / deactivate). (One table, "fixes", for these helpers:
+-- this file is at Lua's limit of 200 top-level locals.)
+local fixes = {}
+function fixes.blockBigMap(block)
+  if not core_input_actionFilter then return end
+  core_input_actionFilter.setGroup("ng64Mario", { "toggleBigMap" })
+  core_input_actionFilter.addAction(0, "ng64Mario", block)
+end
+
 local function deactivate()
   pendingActivateId = nil
+  fixes.blockBigMap(false)
   if not active then return end
   active = false
   sendRaw("D")
@@ -894,6 +952,7 @@ local function handlePacket(data)
       if msg and msg:sub(1, 2) == "ok" then hud.setImages(msg:find("hud") ~= nil) end
       if not connected then log("I", logTag, "connected to NG64 helper") end
       connected = true
+      levelSurfacesSent = false          -- a (re)started helper has none of them
       warnedNoHelper = false
       ensureMaterial(path)
     else
@@ -989,6 +1048,24 @@ local function sendFocus()
   end
 end
 
+-- AI traffic only avoids what's in BeamNG's object list, and Mario's anchor isn't in it (it has no wheels, so the
+-- game never tracks it): traffic drove straight through him. Every frame he's put in the list as the anchor,
+-- where he actually is and the way he's facing - moving, or stopped (so traffic goes round him rather than
+-- queueing behind him for ever).
+fixes.trafficStates = { ignitionLevel = 2 }
+function fixes.tellTraffic(pos, f)
+  if not (map and map.tempObjectData and stubId) then return end
+  local vel = f.vel or vec3(0, 0, 0)
+  local fa = f.faceAngle or 0
+  local dir = vec3(math.sin(fa), -math.cos(fa), 0)   -- sm64 facing -> bng heading
+  map.tempObjectData(stubId, true, vec3(pos.x, pos.y, pos.z), vec3(vel.x, vel.y, vel.z), dir, vec3(0, 0, 1), 0)
+  local o = map.objects and map.objects[stubId]
+  if o then
+    fixes.trafficStates.ignitionLevel = vel:squaredLength() > 1 and 2 or 0
+    o.states = fixes.trafficStates
+  end
+end
+
 local lastMaterialCheck
 local function onUpdate(dtReal, dtSim, dtRaw)
   noteFrame()
@@ -1075,6 +1152,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     sendVehicles(pos, dt)
     prof("vehicles")
     checkVehicleHurt(pos, lastLocalFrame.vel, dt)
+    fixes.tellTraffic(pos, lastLocalFrame)
     sendMpState(dt)
     if controlled then applyCamera() end
     prof("camera")
@@ -1119,6 +1197,7 @@ end
 -- and the camera goes back to the game's. Switching back to him hands control back.
 setControlled = function(on)
   controlled = on
+  fixes.blockBigMap(on)
   sendRaw("N" .. string.char(on and 1 or 0))
   if not on and commands.isFreeCamera() then commands.setGameCamera() end
   log("I", logTag, on and "controlling mario" or "mario left standing; controlling another vehicle")
@@ -1171,8 +1250,8 @@ end
 
 -- UAT / console helpers
 -- flags (tests): y = press Y, music = press the music toggle
-local function scriptInput(stickX, stickY, a, b, z, frames, dirX, dirY, y, music)
-  local flags = (y and 1 or 0) + (music and 2 or 0)
+local function scriptInput(stickX, stickY, a, b, z, frames, dirX, dirY, y, music, song)
+  local flags = (y and 1 or 0) + (music and 2 or 0) + (song == 1 and 4 or 0) + (song == -1 and 8 or 0)
   local extra = dirX and (packF(dirX, dirY) .. (flags > 0 and string.char(flags) or "")) or ""
   sendRaw("I" .. packF(stickX or 0, stickY or 0) .. string.char(a and 1 or 0, b and 1 or 0, z and 1 or 0) .. packU16(frames or 1) .. extra)
 end

@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define NG64_PORT          47064
-#define NG64_PROTO_VERSION 9
+#define NG64_PROTO_VERSION 10
 
 // BeamNG metres per SM64 unit (same scale sm64-san-andreas uses for GTA).
 #define NG64_SCALE 0.0085f
@@ -29,6 +29,9 @@
 #define MSG_FOCUS     'Z'  // u8: 1 = the game window has focus (input is only read then). Sent on change and every second
 #define MSG_HEAL      'h'  // u8 healCounter: heal Mario like SM64 coins do (4 = one wedge). Older helpers ignore it
 #define MSG_TELEPORT  'M'  // f32 x, y, z (bng); optional u8 reset (full health, freefall)
+#define MSG_SURFACES  'G'  // u16 chunk, chunks, count; count * {u16 type; i16 force; f32 v[9]} (bng): a level's own SM64
+                           // surfaces with their original types (chunks = 0 clears them). Replaces nothing else
+#define MSG_WATER     'J'  // u8 count; count * {f32 x0, y0, x1, y1, z} (bng): water boxes (count = 0: no water)
 #define MSG_PART_REQ  'B'  // u32 key; u8 part; u32 hash - the client has no geometry for this part/hash (lost or new)
 
 // helper -> client

@@ -133,7 +133,7 @@ stop `ng64helper` before testing a fresh build.
   FFI arrays so Lua's garbage collector never scans them, and the helper rebuilds its collision at most twice a
   second (about 15 ms). Shapes are parsed once, in the background, prefetched within 120 m of Mario. A very large
   one (West Coast USA's island backdrop is a 164 MB file) can take up to about 20 s the first time, and until then
-  that one object has no collision. There is no water. Measured with `tests/clip_probe.py`: Mario inside a solid
+  that one object has no collision. There is no water on ordinary maps. Levels built from SM64 itself (the SM64 map port) ship a `sm64_surfaces.json`: the mod sends their original collision with its SM64 surface types (slippery slopes, currents) and water boxes instead, so Mario slides and swims there as in the game. Measured with `tests/clip_probe.py`: Mario inside a solid
   object is 0% on Gridmap and about 0.2% on West Coast USA; SM64's floor agrees with BeamNG's raycasts at 99%+ of
   points (`tests/world_check.py`).
 - **Vehicle hulls are top-down** (the highest node per 0.35 m cell, with walls down to the underside), so Mario
