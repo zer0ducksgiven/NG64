@@ -1,0 +1,41 @@
+NG64 - Super Mario 64's Mario in BeamNG.drive
+=============================================
+
+You need your own Super Mario 64 (US) ROM. NG64 contains nothing from the game.
+Close BeamNG.drive before installing.
+
+
+EASY WAY: the installer
+-----------------------
+1. Run NG64-Setup.exe (no admin rights needed).
+2. Choose your Super Mario 64 ROM (any file name; .z64, .v64 or .n64).
+3. Check the BeamNG mods folder (it's found for you; usually right as it is).
+4. Install. Then start BeamNG.drive and spawn NG64 -> Mario from the vehicle
+   selector.
+
+NG64's helper now starts by itself whenever BeamNG does, and closes with it.
+If the game says the helper isn't running, start "NG64" from the Start menu.
+To remove NG64, uninstall it from Windows' Installed apps.
+
+
+BY HAND
+-------
+1. Copy ng64.zip into BeamNG's mods folder, normally:
+   %LOCALAPPDATA%\BeamNG\BeamNG.drive\current\mods
+2. Put ng64helper.exe in a folder of its own, with your ROM next to it
+   (any file name), or the ROM's full path in a rom.txt next to it.
+3. Start ng64helper.exe each time you play (it has no window, and closes
+   when the game does). Or start "ng64helper.exe --watch" once: it then
+   starts the helper whenever BeamNG runs.
+4. In BeamNG, spawn NG64 -> Mario.
+
+
+MULTIPLAYER (BeamMP)
+--------------------
+Server: put ng64.zip in Resources/Client/ and the beammp_server_plugin
+folder in Resources/Server/ as NG64. Every player needs NG64 installed.
+
+
+Controls, troubleshooting and credits: README.md (also on the project page).
+NG64 is built on libsm64 (https://github.com/libsm64/libsm64).
+NG64 is a fan project, not affiliated with Nintendo or BeamNG GmbH.

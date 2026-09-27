@@ -9,7 +9,10 @@
 ;    the helper closes with the game (a BeamNG mod can't start programs itself)
 
 #define AppName "NG64"
-#define AppVersion "1.0.0"
+; package.sh passes the version from VERSION (/DAppVersion=...)
+#ifndef AppVersion
+  #define AppVersion "0.0.0-dev"
+#endif
 #define Dist "..\dist"
 
 [Setup]
@@ -39,6 +42,7 @@ WelcomeLabel2=This will install NG64, which lets you play as Mario in BeamNG.dri
 Source: "{#Dist}\NG64\ng64helper.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Dist}\ng64.zip"; DestDir: "{code:GetModsDir}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\server\NG64\*"; DestDir: "{app}\beammp_server_plugin"; Flags: ignoreversion recursesubdirs
 
 [Registry]
