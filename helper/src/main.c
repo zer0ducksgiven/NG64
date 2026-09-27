@@ -583,6 +583,7 @@ static void mesh_update(void)
 typedef struct {
     uint32_t objId;
     float *top;        // vehicle-frame height grid
+    float topMax;      // its highest cell (the hull's box, for reaching it)
     int nx, ny;
     float cell, x0, y0, bottom;
 } Hull;
@@ -833,6 +834,8 @@ static void load_hull(const uint8_t *p, int len)
     memcpy(hl->top, p + 26, sizeof(float) * nx * ny);
     hl->nx = nx; hl->ny = ny;
     hl->cell = cell; hl->x0 = x0; hl->y0 = y0; hl->bottom = bottom;
+    hl->topMax = bottom;
+    for (int k = 0; k < nx * ny; k++) if (!isnan(hl->top[k]) && hl->top[k] > hl->topMax) hl->topMax = hl->top[k];
 
     int saved = s_surfCount;
     heightfield_surfaces(hl->top, nx, ny, x0 + cell * 0.5f, y0 + cell * 0.5f, cell, HULL_STEP, 1, bottom);
@@ -1079,7 +1082,7 @@ static void read_pad(Pad *p)
 // carrying cars and wreck pieces (Y / E). SM64 does the lift, carry, heavy walk, throw (B) and put-down (Z); the
 // vehicle's own Lua holds the piece at the point sent here and applies the throw.
 #define ACT_FLAG_THROWING_BIT 0x80000000u
-#define CARRY_REACH_M 1.0f
+#define CARRY_REACH_M 1.2f   // from Mario (chest height) to the nearest point of the piece
 
 static struct { int active; uint32_t vehId; int piece, heavy; } s_carry;
 static int s_injectB, s_prevY, s_scriptY, s_prevZ, s_effZ;
@@ -1170,12 +1173,20 @@ static void send_carry(int kind, const Vehicle *v, int piece, int heavy, const f
 }
 
 // nearest carryable piece in front of Mario: distance from a point just ahead of him to each hull piece's footprint
+static char s_carryMiss[256];   // why the last carry_target found nothing (log)
+// What Y picks up: the nearest car or wreck piece he's facing, measured from Mario himself (chest height) to each
+// piece's whole hull box - its footprint and its height, in the car's own frame. Used to be a single point 0.4 m in
+// front of him against the footprint only: pinned against a crumpled corner at an angle, or under a bent panel,
+// that point could miss for seconds while he ran on the spot. Anything he's touching always counts.
+#define CARRY_TOUCH_M 0.35f
 static Vehicle *carry_target(const Mario *m, int *pieceOut)
 {
+    s_carryMiss[0] = 0;
     const struct SM64MarioState *st = &m->state;
-    float ahead[3] = { st->position[0] + sinf(st->faceAngle) * 50, st->position[1] + 40, st->position[2] + cosf(st->faceAngle) * 50 };
+    float chest[3] = { st->position[0], st->position[1] + 50, st->position[2] };
     float b[3];
-    sm2bng(ahead, b);
+    sm2bng(chest, b);
+    float face[2] = { sinf(st->faceAngle), -cosf(st->faceAngle) };   // his facing, bng x/y
     Vehicle *best = NULL;
     float bestD = CARRY_REACH_M;
     for (int v = 0; v < MAX_VEH; v++) {
@@ -1185,29 +1196,38 @@ static Vehicle *carry_target(const Mario *m, int *pieceOut)
         float lx = d[0] * veh->rightB[0] + d[1] * veh->rightB[1] + d[2] * veh->rightB[2];
         float ly = d[0] * veh->fwdB[0] + d[1] * veh->fwdB[1] + d[2] * veh->fwdB[2];
         float lz = d[0] * veh->upB[0] + d[1] * veh->upB[1] + d[2] * veh->upB[2];
-        if (!veh->isHull) {
-            float closest[3], sp[3];
-            bng2sm(b, sp);
-            point_near_box(veh, sp, 0, closest);
-            float dx = (closest[0] - sp[0]) * S, dy = (closest[1] - sp[1]) * S, dz = (closest[2] - sp[2]) * S;
+        int pieces = veh->isHull ? veh->numHulls : 1;
+        for (int h = 0; h < pieces; h++) {
+            float c[3];   // nearest point of the piece's box, world (bng)
+            if (veh->isHull) {
+                const Hull *hl = &veh->hulls[h];
+                if (!hl->top) continue;
+                float x1 = hl->x0 + hl->nx * hl->cell, y1 = hl->y0 + hl->ny * hl->cell;
+                float nxl = lx < hl->x0 ? hl->x0 : lx > x1 ? x1 : lx;
+                float nyl = ly < hl->y0 ? hl->y0 : ly > y1 ? y1 : ly;
+                float nzl = lz < hl->bottom ? hl->bottom : lz > hl->topMax ? hl->topMax : lz;
+                for (int k = 0; k < 3; k++)
+                    c[k] = veh->orgB[k] + veh->rightB[k] * nxl + veh->fwdB[k] * nyl + veh->upB[k] * nzl;
+            } else {
+                float sp[3], cs[3];
+                bng2sm(b, sp);
+                point_near_box(veh, sp, 0, cs);
+                sm2bng(cs, c);
+            }
+            float dx = c[0] - b[0], dy = c[1] - b[1], dz = c[2] - b[2];
             float dist = sqrtf(dx * dx + dy * dy + dz * dz);
-            if (dist < bestD) { bestD = dist; best = veh; *pieceOut = 0; }
-            continue;
-        }
-        for (int h = 0; h < veh->numHulls; h++) {
-            const Hull *hl = &veh->hulls[h];
-            if (!hl->top) continue;
-            float x1 = hl->x0 + hl->nx * hl->cell, y1 = hl->y0 + hl->ny * hl->cell;
-            float dx = lx < hl->x0 ? hl->x0 - lx : lx > x1 ? lx - x1 : 0;
-            float dy = ly < hl->y0 ? hl->y0 - ly : ly > y1 ? ly - y1 : 0;
-            float dz = lz < hl->bottom - 0.3f ? hl->bottom - 0.3f - lz : 0;
-            float dist = sqrtf(dx * dx + dy * dy + dz * dz);
-            if (dist < bestD) { bestD = dist; best = veh; *pieceOut = h; }
+            float horiz = sqrtf(dx * dx + dy * dy);
+            float facing = horiz > 1e-3f ? (dx * face[0] + dy * face[1]) / horiz : 1;
+            if (dist < 4 && strlen(s_carryMiss) < sizeof(s_carryMiss) - 64)
+                snprintf(s_carryMiss + strlen(s_carryMiss), sizeof(s_carryMiss) - strlen(s_carryMiss),
+                         "veh %u piece %d: %.2f m, facing %.2f; ", veh->vehId, h, dist, facing);
+            if (dist >= bestD) continue;
+            if (dist > CARRY_TOUCH_M && facing < 0.3f) continue;   // near but behind / beside him
+            bestD = dist; best = veh; *pieceOut = h;
         }
     }
     return best;
 }
-
 static void carry_update(Mario *m, const Pad *pad)
 {
     const struct SM64MarioState *st = &m->state;
@@ -1221,7 +1241,10 @@ static void carry_update(Mario *m, const Pad *pad)
         if (!yEdge || (st->action & ACT_FLAG_AIR)) return;
         int piece = 0;
         v = carry_target(m, &piece);
-        if (!v) return;
+        if (!v) {
+            logf_("Y: nothing in reach (%s)", s_carryMiss);
+            return;
+        }
         // the main body lifts overhead (heavy); a piece that came off lifts like a crate
         int heavy = piece == 0;
         sm64_mario_pick_up(m->id, heavy != 0);
@@ -1830,6 +1853,12 @@ int main(int argc, char **argv)
 
     char logPath[MAX_PATH];
     snprintf(logPath, sizeof(logPath), "%s\\ng64helper.log", exeDir);
+    {
+        // keep the previous run's log: the watcher starts a new helper every time the game starts
+        char oldPath[MAX_PATH];
+        snprintf(oldPath, sizeof(oldPath), "%s\ng64helper.old.log", exeDir);
+        MoveFileExA(logPath, oldPath, MOVEFILE_REPLACE_EXISTING);
+    }
     s_log = fopen(logPath, "w");
 
     // ROM: --rom, else sm64.us.z64 next to the exe, else any path in rom.txt next to the exe
