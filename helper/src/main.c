@@ -1082,7 +1082,7 @@ static void read_pad(Pad *p)
 // carrying cars and wreck pieces (Y / E). SM64 does the lift, carry, heavy walk, throw (B) and put-down (Z); the
 // vehicle's own Lua holds the piece at the point sent here and applies the throw.
 #define ACT_FLAG_THROWING_BIT 0x80000000u
-#define CARRY_REACH_M 1.2f   // from Mario (chest height) to the nearest point of the piece
+#define CARRY_REACH_M 1.5f   // from Mario (chest height) to the nearest point of a piece he faces (as far as the old 0.4 m-ahead point + 1 m reached)
 
 static struct { int active; uint32_t vehId; int piece, heavy; } s_carry;
 static int s_injectB, s_prevY, s_scriptY, s_prevZ, s_effZ;
