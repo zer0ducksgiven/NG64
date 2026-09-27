@@ -1,6 +1,6 @@
 --- a/src/libsm64.c
 +++ b/src/libsm64.c
-@@ -725,3 +725,43 @@
+@@ -725,3 +725,47 @@
  {
      gAudioVolume = vol;
  }
@@ -30,6 +30,10 @@
 +    gMarioState->heldObj = NULL;
 +    gMarioState->usedObj = o;
 +    set_mario_action( gMarioState, ACT_PICKING_UP, 0 );
++    // straight to the lift: SM64 lifts when the reach animation ends, but here that is whatever Mario was already
++    // playing (a looping walk or idle can take seconds to "end", or never), so he walked on the spot meanwhile
++    mario_grab_used_object( gMarioState );
++    gMarioState->actionState = 1;
 +}
 +
 +SM64_LIB_FN bool sm64_mario_is_holding(int32_t marioId)
