@@ -92,6 +92,8 @@ Input off for BeamNG.
 | Spin throw | Hold Y (Triangle / Switch X), circle the left stick, let go to throw | Hold E (it winds up by itself), let go |
 | Music on / off | Back (View) / Share or Create / Minus, tap | M |
 | Next / previous song | Hold Back + RB / LB | ] / [ |
+| Pickups on / off | — | P |
+| Enemies on / off | — | O |
 
 Buttons are matched by position, so the bottom button always jumps whichever controller you have.
 
@@ -124,6 +126,17 @@ Buttons are matched by position, so the bottom button always jumps whichever con
   notification area (Windows may keep it in the `^` overflow); hover it for "NG64 helper - running".
 - While you're Mario, BeamNG's big map (normally Back / M) is switched off, so the music keys don't open it.
 - **Music:** SM64's songs, from your ROM. All 34 can be cycled through; the current one shows on screen.
+- **Pickups:** SM64's yellow, red and blue coins, Power Stars, the Metal Cap, the Wing Cap and the invincibility star
+  appear around Mario as he moves and fade out behind him. Coins heal and count on the HUD; a star counts as a star. The
+  caps and the invincibility star play SM64's own power-up music while they last (even if you had the music off), then
+  your music comes back (or silence, if it was off). Cars don't touch pickups yet. Toggle them with **P**.
+- **Enemies:** goombas (very common), bob-ombs (common) and koopas (rare) wander around Mario, in about SM64's proportions
+  and never more than a handful at once. Jump on a goomba or koopa to squash it (a koopa leaves a shell you can kick),
+  touch one and it hurts, a bob-omb lights its fuse when it sees you and blows up. **Cars can flatten them too**, and take
+  a small dent for it; a bob-omb's blast dents and shoves cars. Toggle them with **O**.
+- **Settings app:** a small collapsible "NG64 Settings" panel at the top left (beside the HUD) with the pickups and enemies
+  switches, a music picker (Off or any of the 34 songs) and a volume slider. To click it you need BeamNG's mouse cursor
+  (the UI focus key); P / O and the music keys work without. Your choices are remembered.
 - **Spin throw:** tap Y for the ordinary lift; *hold* it next to a car and Mario takes it by one end like Bowser's
   tail. Circle the stick (any direction) to wind up the spin, up to SM64's fastest. He turns on the spot with the
   car swinging round him. Let go of Y to throw: the car goes the way it was moving, up at an angle and tumbling, and
@@ -136,7 +149,7 @@ Buttons are matched by position, so the bottom button always jumps whichever con
   Replacing him in the vehicle selector removes him.
 - **HUD:** while you're Mario, the screen shows SM64's HUD. The power meter appears when he's hurt. You have 4
   lives; when his health runs out, respawn him with the vehicle reset (**R**). After the last life, it's game over
-  and the next respawn starts at 4 again. Nothing in BeamNG hands out coins or stars yet (maps and mods can).
+  and the next respawn starts at 4 again. Coins and stars come from the pickups scattered around you (below); maps and mods can hand them out too.
 - **Reset (R)** puts Mario back on his feet at full health, where BeamNG's reset puts vehicles.
 
 ## Updates

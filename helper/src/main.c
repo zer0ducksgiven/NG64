@@ -1291,7 +1291,7 @@ static void read_toggles(void)
 {
     static int prevP, prevO;
     int p = 0, o = 0;
-    if ((s_ignoreFocus || s_gameFocused) && s_inputEnabled) {
+    if (!s_ignoreFocus && s_gameFocused && s_inputEnabled) {   // not under --ignore-focus (tests): stray keystrokes would flip the options
         p = (GetAsyncKeyState('P') & 0x8000) != 0;
         o = (GetAsyncKeyState('O') & 0x8000) != 0;
     }

@@ -622,6 +622,12 @@ function M.update(dt, marioPos)
   end
 end
 
+function M.list()
+  local out = {}
+  for id, e in pairs(active) do out[#out + 1] = { id = id, type = e.type, state = e.state, x = e.tx, y = e.ty, z = e.tz } end
+  return out
+end
+
 function M.getStatus()
   local n, e = 0, 0
   for _, v in pairs(active) do if v.type <= STAR_POWER then n = n + 1 else e = e + 1 end end

@@ -80,7 +80,7 @@ try:
     opt = [e for e in events if e[0] == 9]
     check(bool(opt), "the hello gets the options state back: %s" % (str(opt[-1][2:]) if opt else "none"))
     s.sendto(b"o" + bytes([1, 1, 255, 255]), dst)
-    pump(70)
+    pump(float(os.environ.get("SOAK","70")))
     check(proc.poll() is None, "the helper is still running (exit %s); Mario action %s" % (proc.poll(), hex(frames[-1]) if frames else None))
     check(0 < max_pick <= 12, "pickups spawn and stay within the cap (max %d)" % max_pick)
     check(0 < max_enemy <= 7, "enemies spawn and stay within the cap (max %d)" % max_enemy)
@@ -101,6 +101,7 @@ try:
     else:
         check(False, "no coin to collect")
 
+    print("DEBUG2", len(ents), [ (i,e) for i,e in list(ents.items())[:3]], len(events)); s.sendto(b"P", dst); pump(0.5); print("DEBUG3", len(events))
     # turn them off
     print("DEBUG before off: ents", len(ents), "events", len(events), "heal-less frames", len(frames))
     s.sendto(b"o" + bytes([0, 0, 255, 255]), dst)

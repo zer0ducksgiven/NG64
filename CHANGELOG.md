@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.0
+
+**Pickups** (toggle: P)
+- SM64's yellow, red and blue coins, Power Stars, Metal Cap, Wing Cap and a temporary invincibility star appear at random
+  around Mario, streamed in as he moves. The caps and the star play their own SM64 music while active, then your music
+  (or silence, if you had it off) returns. Cars can't interact with them yet.
+
+**Enemies** (toggle: O)
+- Goombas, bob-ombs and koopas spawn around Mario in roughly SM64's proportions, capped to a reasonable number. Mario can
+  stomp, kick and get hurt by them; bob-ombs light a fuse and explode. Cars can flatten them (the car takes a small dent),
+  and a bob-omb's blast dents and shoves cars.
+
+**Settings app**
+- A small collapsible "NG64 Settings" panel appears with the HUD: pickups and enemies switches, a music picker and a volume
+  slider. Settings are saved in `ng64settings.txt` next to the helper.
+
 ## 0.1.4
 
 **Update notice**
