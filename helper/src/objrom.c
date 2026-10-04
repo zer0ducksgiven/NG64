@@ -32,7 +32,7 @@ static const struct { int model; uint32_t geo; } k_models[OM_COUNT] = {
     [OM_CAP_METAL] = { OM_CAP_METAL, 0x16000CF0 }, [OM_CAP_WING] = { OM_CAP_WING, 0x16000D3C },
     [OM_GOOMBA] = { OM_GOOMBA, 0x0F0006E4 }, [OM_BOBOMB] = { OM_BOBOMB, 0x0F0007B8 },
     [OM_KOOPA] = { OM_KOOPA, 0x0D000214 }, [OM_KOOPA_SHELL] = { OM_KOOPA_SHELL, 0x0F000AB0 },
-    [OM_EXPLOSION] = { OM_EXPLOSION, 0x16000040 },
+    [OM_EXPLOSION] = { OM_EXPLOSION, 0x16000040 }, [OM_KOOPA_NOSHELL] = { OM_KOOPA_NOSHELL, 0x0D0000D0 },
 };
 
 static const uint8_t *s_rom;
@@ -706,11 +706,12 @@ static const uint8_t *anim_struct(uint32_t anim)
     return segp(anim, 24);
 }
 
-int objrom_anim_info(uint32_t anim, int *loopStart, int *loopEnd, int *flags)
+int objrom_anim_info(uint32_t anim, int *startFrame, int *loopStart, int *loopEnd, int *flags)
 {
     const uint8_t *a = anim_struct(anim);
     if (!a) { s_failed = 0; return 0; }
     if (flags) *flags = be16(a);
+    if (startFrame) *startFrame = be16(a + 4);
     if (loopStart) *loopStart = be16(a + 6);
     if (loopEnd) *loopEnd = be16(a + 8);
     return 1;

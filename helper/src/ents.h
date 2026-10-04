@@ -1,5 +1,7 @@
 // SM64's pickups (coins, power stars, metal / wing caps, an invincibility star) and a few of its enemies (goombas,
-// bob-ombs, koopas) scattered round Mario, simulated here at 30 Hz and drawn by the mod from the entity packet.
+// bob-ombs, koopas), scattered round Mario, simulated here at 30 Hz the way the game's own object code runs them (the
+// behaviours follow the decompilation's: goomba, bob-omb, koopa, shell, coin, star, cap, explosion), and drawn by the
+// mod from the entity packet using the models read from the player's ROM (objrom.c).
 // They live in sm64 units like Mario; the packet and events are in BeamNG's (bng) coordinates and metres.
 #ifndef NG64_ENTS_H
 #define NG64_ENTS_H
@@ -11,6 +13,7 @@
 enum {
     ENT_COIN_YELLOW = 1, ENT_COIN_RED, ENT_COIN_BLUE, ENT_POWER_STAR, ENT_CAP_METAL, ENT_CAP_WING, ENT_STAR_POWER,
     ENT_GOOMBA = 20, ENT_BOBOMB, ENT_KOOPA, ENT_SHELL,
+    ENT_EXPLOSION = 30, ENT_SPARKLES,
 };
 
 // events for the mod (kind, entity id, and four numbers: position bng x, y, z and a value / radius)
@@ -32,7 +35,7 @@ typedef struct {
     // not a place to spawn (inside a vehicle, under water)
     int (*blocked)(float x, float y, float z, float floorY);
     void (*event)(int kind, int id, float x, float y, float z, float d);
-    void (*lock)(void);     // around the libsm64 calls that start sounds
+    void (*lock)(void);     // around the libsm64 calls
     void (*unlock)(void);
 } EntHost;
 
@@ -45,6 +48,8 @@ void ents_tick(uint32_t tick, int marioId, const struct SM64MarioState *st);
 int ents_pack(uint8_t *out, size_t cap);
 // a car ran an enemy over (or a shell hit one): kind 0 = run over
 void ents_car_kill(int id, int kind);
+// the same with the direction the car was going (SM64 x, z, any length)
+void ents_car_hit(int id, int kind, int haveDir, float dirX, float dirZ);
 int ents_star_active(void);
 void ents_clear(void);
 int ents_count(int enemies);

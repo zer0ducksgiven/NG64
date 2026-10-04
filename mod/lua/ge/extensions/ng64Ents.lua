@@ -53,7 +53,7 @@ local function makeMaterial(name, flat)
   mat:setField("mapTo", 0, name)
   mat:setField("colorMap", 0, matPath)
   -- BeamNG's light is dimmer than SM64's flat white: brighten the textures (the unlit ones, coins and sprites, most)
-  local b = flat and "1.7 1.7 1.7 1" or "1.15 1.15 1.15 1"
+  local b = flat and "1.7 1.7 1.7 1" or "1.0 1.0 1.0 1"
   mat:setField("diffuseColor", 0, b)
   mat:setField("alphaTest", 0, "1")
   mat:setField("alphaRef", 0, "127")
@@ -99,7 +99,11 @@ function M.onPiece(data)
     local v = overts[i]
     -- SM64 (x, y up, z) -> BeamNG (x, -z, y), in metres
     verts[i + 1] = { x = v.p[0] * S, y = -v.p[2] * S, z = v.p[1] * S }
-    normals[i + 1] = { x = v.n[0] / 127, y = -v.n[2] / 127, z = v.n[1] / 127 }
+    -- SM64 lights its actors from above-front with a strong ambient part, so no side goes black: BeamNG's sun would
+    -- leave the undersides dark, so the normals are tilted toward the sky (the shading stays, softened)
+    local nx, ny, nz = v.n[0] / 127 * 0.45, -v.n[2] / 127 * 0.45, v.n[1] / 127 * 0.45 + 1
+    local nl = math.sqrt(nx * nx + ny * ny + nz * nz)
+    normals[i + 1] = { x = nx / nl, y = ny / nl, z = nz / nl }
     uvs[i + 1] = { u = v.uv[0] / 65535, v = v.uv[1] / 65535 }
   end
   for i = 0, ni - 1 do local k = oidx[i] faces[i + 1] = { v = k, n = k, u = k } end
@@ -320,7 +324,7 @@ local carHit = {}   -- "enemy id:vehicle id" -> simTime of the last hit
 local function checkCars(marioPos)
   local stub = api.stubId() or -1
   local anyEnemy = false
-  for _, e in pairs(active) do if e.type >= GOOMBA and e.state ~= DEAD then anyEnemy = true break end end
+  for _, e in pairs(active) do if e.type >= GOOMBA and e.type <= KOOPA and e.state ~= DEAD then anyEnemy = true break end end
   if not anyEnemy then return end
   for i = 0, be:getObjectCount() - 1 do
     local veh = be:getObject(i)
@@ -333,17 +337,17 @@ local function checkCars(marioPos)
         local vel = veh:getVelocity()
         local speed = vel:length()
         for eid, e in pairs(active) do
-          if e.type >= GOOMBA and e.state ~= DEAD and e.tx then
+          if e.type >= GOOMBA and e.type <= KOOPA and e.state ~= DEAD and e.tx then
             local p = vec3(e.tx, e.ty, e.tz + 0.3) - ctr
             local inside = true
             for k = 1, 3 do
               local len = ax[k]:length()
               if len > 1e-3 and math.abs(p:dot(ax[k]) / len) > len + 0.35 then inside = false break end
             end
-            local slideShell = e.type == SHELL and e.state == 1
-            if inside and (speed > 2.5 or slideShell) and simTime - (carHit[eid .. ":" .. id] or -9) > 1.0 then
+            if inside and speed > 2.5 and simTime - (carHit[eid .. ":" .. id] or -9) > 1.0 then
               carHit[eid .. ":" .. id] = simTime
-              api.sendRaw("c" .. string.char(eid % 256, math.floor(eid / 256), slideShell and 1 or 0))
+              -- the helper treats it as a fast attack, knocked the way the car was going
+              api.sendRaw("c" .. string.char(eid % 256, math.floor(eid / 256), 0) .. ffi.string(ffi.new("float[2]", vel.x, vel.y), 8))
               -- the car takes a small dent where it met the enemy, scaled to what it hit
               local strength = e.type == GOOMBA and 0.7 or e.type == KOOPA and 0.9 or e.type == SHELL and 1.4 or 0.4
               local dir = speed > 0.5 and (-vel / speed) or vec3(0, 0, 1)

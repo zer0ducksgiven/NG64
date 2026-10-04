@@ -8,7 +8,7 @@
 
 enum {   // models
     OM_COIN_YELLOW, OM_COIN_RED, OM_COIN_BLUE, OM_STAR, OM_STAR_TRANSPARENT,
-    OM_CAP_METAL, OM_CAP_WING, OM_GOOMBA, OM_BOBOMB, OM_KOOPA, OM_KOOPA_SHELL, OM_EXPLOSION,
+    OM_CAP_METAL, OM_CAP_WING, OM_GOOMBA, OM_BOBOMB, OM_KOOPA, OM_KOOPA_SHELL, OM_EXPLOSION, OM_KOOPA_NOSHELL,
     OM_COUNT
 };
 
@@ -52,6 +52,6 @@ const ObjPiece *objrom_piece(int id);
 // poses a model: fills parts[] (up to max) and returns how many
 int objrom_pose(int model, const ObjPose *pose, ObjPart *parts, int max);
 // animation info for the behaviour code: frame count (loopEnd), flags; 0 if the address isn't an animation
-int objrom_anim_info(uint32_t anim, int *loopStart, int *loopEnd, int *flags);
+int objrom_anim_info(uint32_t anim, int *startFrame, int *loopStart, int *loopEnd, int *flags);
 // segmented address of animation #index of an actor's animation table (table also a segmented address), 0 if bad
 uint32_t objrom_anim_from_table(uint32_t table, int index);

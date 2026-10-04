@@ -1081,10 +1081,12 @@ static float deadzone(SHORT v, SHORT dz)
 static int s_gameFocused = 1;
 
 static int s_ignoreFocus;
+static int s_noInput;   // tests: ignore the real keyboard and pads (whoever is typing nearby)
 
 static void read_pad(Pad *p)
 {
     memset(p, 0, sizeof(*p));
+    if (s_noInput) return;
     if (!s_ignoreFocus && !s_gameFocused) return;
     if (s_xinputGetState) {
         for (DWORD i = 0; i < 4; i++) {
@@ -2127,7 +2129,15 @@ static void handle_packet(const uint8_t *p, int len)
             send_options_state();
         }
         break;
-    case MSG_ENT_KILL: if (len >= 3) { uint16_t id; memcpy(&id, p, 2); ents_car_kill(id, p[2]); } break;
+    case MSG_ENT_KILL:
+        if (len >= 3) {
+            uint16_t id; memcpy(&id, p, 2);
+            if (len >= 11) {   // + the car's heading, bng x, y: SM64's z is -y
+                float d[2]; memcpy(d, p + 3, 8);
+                ents_car_hit(id, p[2], 1, d[0], -d[1]);
+            } else ents_car_kill(id, p[2]);
+        }
+        break;
     case MSG_SPIN_BREAK: if (len >= 4) memcpy(&s_carry.breakVeh, p, 4); break;
     case MSG_FLOOR_QUERY: {
         // tests: SM64's floor height under each point, to compare with BeamNG's own raycasts
@@ -2334,6 +2344,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--no-audio")) audio = 0;
         else if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ignore-focus")) s_ignoreFocus = 1;
+        else if (!strcmp(argv[i], "--no-input")) s_noInput = 1;
         else if (!strcmp(argv[i], "--no-update-check")) noUpdateCheck = 1;
         else if (!strcmp(argv[i], "--verbose")) verbose = 1;
         else if (!strcmp(argv[i], "--write-preview") && i + 1 < argc) previewDir = argv[++i];
