@@ -269,10 +269,11 @@ local function spinStart(mx, my, mz, stubId)
   spin = { nodes = nodes, grip = grip, ext = grip > 0 and maxF or -minF, mass = mass, stubId = stubId or 0, t = 0, bad = 0, vehBad = 0 }
 end
 
-local function spinTarget(px, py, pz, phi, omega)
+local function spinTarget(px, py, pz, phi, omega, grip, centreZ)
   if not spin then return end
   spin.P = { px, py, pz }
   spin.phi, spin.omega, spin.age = phi, omega, 0
+  spin.gripD, spin.centreZ = grip, centreZ
 end
 
 -- the car lets go of the spin and keeps a quarter of the speed it had
@@ -312,8 +313,8 @@ spinUpdate = function(dt)
   local ul = math.sqrt(Ux * Ux + Uy * Uy + Uz * Uz)
   Ux, Uy, Uz = Ux / ul, Uy / ul, Uz / ul
   local Rx, Ry, Rz = Fy * Uz - Fz * Uy, Fz * Ux - Fx * Uz, Fx * Uy - Fy * Ux
-  local dist = SPIN_GRIP + s.ext
-  local Cx, Cy, Cz = px + Ox * dist, py + Oy * dist, pz + SPIN_HAND_Z + Oz * dist
+  local dist = (s.gripD or SPIN_GRIP) + s.ext         -- his gloves' reach along the car, plus the car's own half length
+  local Cx, Cy, Cz = px + Ox * dist, py + Oy * dist, pz + (s.centreZ or SPIN_HAND_Z) + Oz * dist
   local gain = math.min(1, 0.25 + 0.75 * s.t / 0.7)        -- the heave from the ground ramps in
   local K, C = SPIN_K * gain, SPIN_C * (0.6 + 0.4 * gain)
   local w2 = omega * omega

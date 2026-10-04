@@ -1127,11 +1127,10 @@ static struct {
     int active; uint32_t vehId; int piece, heavy;
     int spin, spinAuto, relReq;   // Bowser-style spin; the keyboard winds it up by itself; Y was let go
     float prevFace, omega;        // his facing last tick, and the spin rate (rad/s) worked out from it
-    float carOff;                 // the car points out from him this far round (bng yaw) from the way he faces
     float carOff0;                // ...where the car was when he grabbed it
-    int swingTicks;               // ticks since he started swinging: the car comes round to his hands over a few
     float prevPhi;                // where the car pointed last tick (bng yaw)
     int havePhi;
+    float grip, centreZ;          // where along the car it's held and how high its centre rides (smoothed, m)
     uint32_t breakVeh;            // the mod says this car hit something
 } s_carry;
 // Y pressed on a car and still down: a tap is the ordinary lift, a hold is the spin grab
@@ -1319,7 +1318,7 @@ static void start_spin(Mario *m, Vehicle *v, int keyboard)
     float posB[3];
     sm2bng(st->position, posB);
     // the car swings out from where it already is, so it never has to sweep through him to get into place
-    s_carry.carOff0 = s_carry.carOff = atan2f(v->orgB[1] - posB[1], v->orgB[0] - posB[0]) - (st->faceAngle - PI / 2);
+    s_carry.carOff0 = atan2f(v->orgB[1] - posB[1], v->orgB[0] - posB[0]) - (st->faceAngle - PI / 2);
     send_carry(4, v, 0, 1, posB, 0, NULL);
     logf_("grabbed vehicle %u to spin (%s)", v->vehId, keyboard ? "keyboard: it winds up by itself" : "circle the stick");
 }
@@ -1338,20 +1337,40 @@ static void spin_update(Mario *m, Vehicle *v, int yNow)
     const struct SM64MarioState *st = &m->state;
     uint32_t act = st->action;
     int holding = act == ACT_HOLDING_BOWSER, grabbing = act == ACT_PICKING_UP_BOWSER, releasing = act == ACT_RELEASING_BOWSER;
-    // SM64's swing pose has his gloves behind the way he faces (half a turn round: measured), while the grab reaches
-    // towards the car. So the car starts where it is and, as the swing begins, comes round to his hands.
-    if (holding && s_carry.swingTicks < 24) s_carry.swingTicks++;
-    {
-        float d = fmodf(PI - s_carry.carOff0 + 4 * PI, 2 * PI);   // the way round, 0..2 pi
-        float t = s_carry.swingTicks / 24.0f;
-        s_carry.carOff = s_carry.carOff0 + d * (t * t * (3 - 2 * t));
-    }
-    float phi = (st->faceAngle - PI / 2) + s_carry.carOff;   // sm64 yaw -> bng yaw, then round to where the car is
+    // The car stays where it was when he took it: out in front of him, the way he faces, which turns with him. (His
+    // swing pose leans him back with the gloves under the near end of the car; see the grip below.)
+    float phi = (st->faceAngle - PI / 2) + s_carry.carOff0;   // sm64 yaw -> bng yaw, then round to where the car was
     float posB[3];
     sm2bng(st->position, posB);
     // his spin rate in rad/s: SM64 angle units per frame (0x10000 = a turn), 30 frames a second
     float omega = sm64_mario_spin_rate(m->id) * (2 * PI / 65536.0f) * 30.0f;
     if (holding || grabbing) s_carry.omega = omega;
+    // Where his gloves are (the only pure-white part of the model): the near end of the car is held there - this far
+    // out along the way the car points (the gloves swing back as the spin builds, so it can be behind him), and its
+    // underside a hand's width above them.
+    float grip = 0.3f, centreZ = 1.0f;
+    {
+        float gx = 0, gy = 0, gz = 0;
+        int gn = 0;
+        for (int i = 0; i < m->geo.numTrianglesUsed * 3; i++) {
+            const float *c = &m->geo.color[i * 3];
+            if (c[0] < 0.9f || c[1] < 0.9f || c[2] < 0.9f) continue;
+            const float *vp = &m->geo.position[i * 3];
+            gx += vp[0]; gy += vp[1]; gz += vp[2]; gn++;
+        }
+        if (gn) {
+            gx /= gn; gy /= gn; gz /= gn;
+            // along (cos phi, sin phi) in bng = (cos phi, -sin phi) in sm64's x, z
+            grip = ((gx - st->position[0]) * cosf(phi) - (gz - st->position[2]) * sinf(phi)) * S;
+            centreZ = (gy - st->position[1]) * S + 0.6f;
+        }
+        if (s_carry.havePhi) {   // a little smoothing: the gloves jiggle with the animation
+            grip = s_carry.grip + (grip - s_carry.grip) * 0.5f;
+            centreZ = s_carry.centreZ + (centreZ - s_carry.centreZ) * 0.5f;
+        }
+        s_carry.grip = grip;
+        s_carry.centreZ = centreZ;
+    }
     if (s_carry.breakVeh == v->vehId) {
         // the car hit something: he lets go, it drops (its own Lua already stopped holding it)
         SM64_AUDIO_SAFE(sm64_mario_release_bowser(m->id, 1));
@@ -1393,7 +1412,7 @@ static void spin_update(Mario *m, Vehicle *v, int yNow)
     float phiRate = s_carry.havePhi ? angdiff(phi, s_carry.prevPhi) * 30.0f : omega;
     s_carry.prevPhi = phi;
     s_carry.havePhi = 1;
-    float velB[3] = { phiRate, 0, 0 };
+    float velB[3] = { phiRate, grip, centreZ };
     send_carry(5, v, 0, 1, posB, phi, velB);
 }
 

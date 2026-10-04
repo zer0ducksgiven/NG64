@@ -123,6 +123,9 @@ stop `ng64helper` before testing a fresh build.
   The car's own Lua (`ng64Hit.lua` spin*) pulls every node to where a rigid body spinning with him would have it
   (position + velocity springs and the centripetal term); a mean error over 0.8 m, a vehicle in
   `mapmgr.objectCollisionIds`, or never reaching the hold ends the spin (`ng64.onSpinHit` -> `MSG_SPIN_BREAK`).
+  The car stays out in front of him (SM64's swing pose leans him back with his gloves under its near end): it is held 
+  by the end nearer him, at his gloves (their reach along the car and height are measured from the white triangles of 
+  the geometry every tick and sent in kind 5).
   `tests/spin_probe.py [--wall|--shots]`, `tests/terrain_spin_probe.py`.
 - Water: `ng64World.water()` collects WaterBlock (surface = top of the box, any yaw) and WaterPlane objects,
   `MSG_WATER_OBB` sends them as rotated rectangles; SM64-port maps send their own boxes (`MSG_WATER`).

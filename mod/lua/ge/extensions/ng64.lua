@@ -910,9 +910,10 @@ local function onCarry(c)
       c.point[0], c.point[1], c.point[2], stubId or 0))
     log("I", logTag, string.format("mario grabbed vehicle %d to spin it", id))
   elseif kind == 5 then
-    -- spinning: point = his feet, yaw = the direction (bng, radians) the car points out from him, vel[0] = spin rate rad/s
-    veh:queueLuaCommand(string.format("if ng64Hit then ng64Hit.spinTarget(%f,%f,%f,%f,%f) end",
-      c.point[0], c.point[1], c.point[2], c.yaw, c.vel[0]))
+    -- spinning: point = his feet, yaw = the direction (bng, radians) the car points out from him, vel = { the rate it
+    -- turns round him (rad/s), how far along that direction his gloves are (m), how high the car's centre rides (m) }
+    veh:queueLuaCommand(string.format("if ng64Hit then ng64Hit.spinTarget(%f,%f,%f,%f,%f,%f,%f) end",
+      c.point[0], c.point[1], c.point[2], c.yaw, c.vel[0], c.vel[1], c.vel[2]))
   elseif kind == 3 then
     carryingId = nil
     hitGrace[id] = simTime     -- the usual grace after it leaves his hands
