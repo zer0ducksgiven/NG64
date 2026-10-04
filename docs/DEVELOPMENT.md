@@ -107,7 +107,19 @@ stop `ng64helper` before testing a fresh build.
 - Switching to another vehicle (TAB) leaves Mario in the world, standing where he was; switching back hands
   control back.
 - Music: SM64's Bob-omb Battlefield theme from your ROM while you're playing as Mario (on by default). Back/View
-  or M toggles it. Uses `helper/patches/libsm64-music.patch`.
+  or M toggles it. Uses `helper/patches/libsm64-music.patch`. SM64's level-music queue is 6 deep and silently
+  refuses a 7th `play_music`, so a song change empties the queue first (`tests/music_switch_probe.py`).
+- Audio thread (`audio.c`): time-critical MMCSS thread woken by waveOut buffer completion, ~80 ms queued
+  (`NG64_AUDIO_TARGET_MS` overrides), the process opts out of Windows power throttling. libsm64's audio tick and
+  the calls that start sounds share a lock (`SM64_AUDIO_SAFE` in `main.c`). The helper logs `audio: N underrun(s)`
+  every 5 s; `tests/audio_load_probe.py` loads every core and counts them.
+- Controllers: XInput plus DirectInput (`dinput.c`, its own thread: enumerating devices stalls ~150 ms). The
+  DirectInput -> XInput layout mapping is pure (`pad_map.c`, `tests/pad_map_test.c`), `controller.ini` overrides it.
+- Water: `ng64World.water()` collects WaterBlock (surface = top of the box, any yaw) and WaterPlane objects,
+  `MSG_WATER_OBB` sends them as rotated rectangles; SM64-port maps send their own boxes (`MSG_WATER`).
+  `tests/water_probe.py`.
+- Vehicle selector picture and tray icon: rendered / taken from the ROM at run time (`preview.c`, `tray.c`); the
+  installer runs `ng64helper.exe --write-preview <BeamNG user folder>`. Perf checks: `tests/perf_probe.py`.
 - Camera: SM64-style orbit camera with collision pull-in. It swings round behind Mario as he runs away from or
   across the view, but holds and backs up when he runs at it, as SM64's does.
 - Getting run over: SM64's thrown knockback, launched along the car's travel and scaled by its speed. Only the

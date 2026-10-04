@@ -1881,13 +1881,15 @@ static void handle_packet(const uint8_t *p, int len)
 // missing (a by-hand install) a second helper process draws it, so this one's frames don't stall on the render
 static void ensure_preview(const char *userPath)
 {
+    static int started;   // once per run: the mod says hello again every second until it is welcomed
     char png[MAX_PATH];
     snprintf(png, sizeof(png), "%s\\vehicles\\ng64_mario\\default.png", userPath);
-    if (!userPath[0] || !s_exePath[0] || !s_romPathUsed[0] || GetFileAttributesA(png) != INVALID_FILE_ATTRIBUTES) return;
+    if (started || !userPath[0] || !s_exePath[0] || !s_romPathUsed[0] || GetFileAttributesA(png) != INVALID_FILE_ATTRIBUTES) return;
     char cmd[3 * MAX_PATH];
     snprintf(cmd, sizeof(cmd), "\"%s\" --write-preview \"%s\" --rom \"%s\"", s_exePath, userPath, s_romPathUsed);
     STARTUPINFOA si = { sizeof(si) };
     PROCESS_INFORMATION pi;
+    started = 1;
     if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS, NULL, NULL, &si, &pi)) {
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);

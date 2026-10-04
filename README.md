@@ -7,7 +7,7 @@ kicks and ground pounds, on any BeamNG map, against real soft-body vehicles.
 - Punch, kick, dive and ground-pound cars and watch them dent; land on a roof and it buckles.
 - Pick up a car (or a piece that's fallen off one) and throw it, like King Bob-omb.
 - Cars hurt Mario: get run over and he tumbles away, SM64-style.
-- Walks on the map's real collision (buildings, ramps, rails, rocks), on any level.
+- Walks on the map's real collision (buildings, ramps, rails, rocks), on any level, and swims in the water BeamNG draws.
 - Super Mario 64's camera, its HUD (power meter, lives, coins, stars) and its music.
 - Multiplayer through BeamMP.
 
@@ -21,7 +21,7 @@ Mario's model, animations, textures, HUD and music are all read from your ROM on
 - Windows 10 or 11 (Linux through Wine/Proton works too, see below)
 - BeamNG.drive (tested on 0.39)
 - A Super Mario 64 **US** ROM. Any file name; `.z64`, `.v64` and `.n64` dumps all work
-- An Xbox-style controller is recommended; keyboard works too
+- A controller is recommended (Xbox, PlayStation, Switch Pro and most generic pads); keyboard works too
 
 ## Installation
 
@@ -77,19 +77,47 @@ Input off for BeamNG.
 
 ## Playing
 
-| N64 | Xbox controller | Keyboard |
+| N64 | Controller (Xbox / PlayStation / Switch Pro) | Keyboard |
 |---|---|---|
 | Stick | Left stick | W A S D |
-| A (jump) | A | Space |
-| B (punch / kick) | B or X | J |
-| Z (crouch / ground pound) | RT or LT | K |
+| A (jump) | A / Cross / Switch B (bottom button) | Space |
+| B (punch / kick) | B or X / Circle or Square / Switch A or Y | J |
+| Z (crouch / ground pound) | RT or LT / R2 or L2 / ZR or ZL | K |
 | C buttons (camera) | Right stick | Arrow keys |
-| Camera zoom | RB / LB | — |
-| Pick up / throw | Y | E |
-| Music on / off | Back (View), tap | M |
+| Camera zoom | RB / LB / R1 / L1 / R / L | — |
+| Pick up / throw | Y / Triangle / Switch X (top button) | E |
+| Music on / off | Back (View) / Share or Create / Minus, tap | M |
 | Next / previous song | Hold Back + RB / LB | ] / [ |
 
+Buttons are matched by position, so the bottom button always jumps whichever controller you have.
+
 - Controls only work while the BeamNG window is in front.
+- **Controllers:** Xbox pads work through XInput; PlayStation (DualShock 4 / DualSense), Switch Pro and generic
+  DirectInput pads are read through DirectInput as well, and both can be plugged in at once. If a button of yours
+  lands in the wrong place, put a `controller.ini` next to `ng64helper.exe` (`%LOCALAPPDATA%\NG64`):
+
+  ```ini
+  # button numbers start at 1, as in Windows' "Set up USB game controllers" dialog; 0 turns a button off
+  layout = switch        # or playstation (the default for anything that isn't a Nintendo pad)
+  a = 2
+  b = 3
+  x = 1
+  y = 4
+  lb = 5
+  rb = 6
+  lt = 7
+  rt = 8
+  back = 9
+  # sticks: X Y Z RX RY RZ (a leading - flips the direction)
+  rx = Z
+  ry = -RZ
+  ```
+
+  The helper's log names each DirectInput pad it finds and the layout it chose.
+- **Water:** Mario swims in lakes and the sea on any map (WaterBlock and WaterPlane water; BeamNG's rivers aren't
+  covered yet).
+- **The helper's tray icon:** while the helper is running, Mario's head from the lives counter sits in the
+  notification area (Windows may keep it in the `^` overflow); hover it for "NG64 helper - running".
 - While you're Mario, BeamNG's big map (normally Back / M) is switched off, so the music keys don't open it.
 - **Music:** SM64's songs, from your ROM. All 34 can be cycled through; the current one shows on screen.
 - **Traffic** sees Mario: AI cars slow down or steer round him instead of running him over.
