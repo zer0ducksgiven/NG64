@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.3
+
+- DualSense (and other pads Windows lists as a "first person" device) weren't found by the DirectInput reader; now they are.
+- The helper's log notes the first controller button presses with their DirectInput numbers, for `controller.ini`.
+
 ## 0.1.2
 
 **Controllers**

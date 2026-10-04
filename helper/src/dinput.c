@@ -20,6 +20,7 @@ typedef struct {
     IDirectInputDevice8A *dev;
     GUID inst;
     unsigned axisMask;
+    unsigned char prev[32];   // buttons last poll, to log presses
     NgPadMap map;
 } Dev;
 
@@ -66,7 +67,8 @@ static BOOL CALLBACK enum_cb(const DIDEVICEINSTANCEA *inst, void *ctx)
 {
     Found *f = ctx;
     BYTE type = GET_DIDEVICE_TYPE(inst->dwDevType);
-    if ((type == DI8DEVTYPE_GAMEPAD || type == DI8DEVTYPE_JOYSTICK) && f->n < 16) {
+    // a DualSense reports itself as a "first person" device (type 24), not a gamepad; wheels and flight sticks stay out
+    if ((type == DI8DEVTYPE_GAMEPAD || type == DI8DEVTYPE_JOYSTICK || type == DI8DEVTYPE_1STPERSON) && f->n < 16) {
         f->inst[f->n] = *inst;
         f->guids[f->n++] = inst->guidInstance;
     }
@@ -162,7 +164,14 @@ static void poll_all(Pad *out)
         s.axisMask = d->axisMask;
         s.axis[0] = st.lX; s.axis[1] = st.lY; s.axis[2] = st.lZ; s.axis[3] = st.lRx; s.axis[4] = st.lRy; s.axis[5] = st.lRz;
         s.axis[6] = st.rglSlider[0]; s.axis[7] = st.rglSlider[1];
-        for (int b = 0; b < 32; b++) s.btn[b] = (st.rgbButtons[b] & 0x80) != 0;
+        for (int b = 0; b < 32; b++) {
+            s.btn[b] = (st.rgbButtons[b] & 0x80) != 0;
+            // the first presses are logged with their DirectInput number (the one controller.ini uses), so a
+            // button that does the wrong thing can be told apart from the log
+            static int logged;
+            if (s.btn[b] && !d->prev[b] && logged < 60) { logged++; say("controller button %d pressed", b + 1); }
+            d->prev[b] = s.btn[b];
+        }
         Pad p;
         ng_pad_map(&d->map, &s, &p);
         merge(out, &p);
