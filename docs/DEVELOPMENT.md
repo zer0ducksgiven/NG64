@@ -132,7 +132,7 @@ stop `ng64helper` before testing a fresh build.
   per run as a `toastl:` message (a long-lived toast in the mod). `NG64_UPDATE_TEST_VERSION=0.1.0` pretends to be an older
   version; `tests/update_check_test.py`, `tests/update_test.c`.
 - Fire: each car reports its burning nodes (`ng64Hit.lua`, from BeamNG's `fire.hotNodes`, ~10 Hz) to `ng64.onFire`; the
-  GE side sends the ones near Mario as flame spheres (`MSG_FIRE`, protocol 12; pickups and enemies are `ents.c` in the helper, drawn by `ng64Ents.lua`, protocol 13); the helper's `check_fire` lights him up with
+  GE side sends the ones near Mario as flame spheres (`MSG_FIRE`, protocol 12; pickups and enemies: `objrom.c` reads their geo layouts, Fast3D display lists, textures and animations from the ROM (the MIO0 banks and geo segments are at fixed US offsets listed at its top; the textures go into one atlas PNG written at run time) and poses them like SM64's scene graph; `ents.c` ports the decompilation's object code (engine, Mario's interactions, behaviours) and packs each object as rigid pieces; `ng64Ents.lua` builds a mesh per piece and moves them; protocol 14. `tests/objs_test.py` checks it headless (use `--no-input`; a Mario left idle falls asleep and, without audio, stalls the helper)); the helper's `check_fire` lights him up with
   `sm64_mario_burn` (`libsm64-burn.patch`: SM64's interact_flame - burning actions, health drain, water puts it out) when
   one touches his body, and the GE emits fire particles from his anchor vehicle while he burns. `tests/fire_probe.py`.
 - Water: `ng64World.water()` collects WaterBlock (surface = the block's position height, any yaw; the box is its depth) and WaterPlane objects,

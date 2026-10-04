@@ -126,14 +126,20 @@ Buttons are matched by position, so the bottom button always jumps whichever con
   notification area (Windows may keep it in the `^` overflow); hover it for "NG64 helper - running".
 - While you're Mario, BeamNG's big map (normally Back / M) is switched off, so the music keys don't open it.
 - **Music:** SM64's songs, from your ROM. All 34 can be cycled through; the current one shows on screen.
-- **Pickups:** SM64's yellow, red and blue coins, Power Stars, the Metal Cap, the Wing Cap and the invincibility star
-  appear around Mario as he moves and fade out behind him. Coins heal and count on the HUD; a star counts as a star. The
-  caps and the invincibility star play SM64's own power-up music while they last (even if you had the music off), then
-  your music comes back (or silence, if it was off). Cars don't touch pickups yet. Toggle them with **P**.
-- **Enemies:** goombas (very common), bob-ombs (common) and koopas (rare) wander around Mario, in about SM64's proportions
-  and never more than a handful at once. Jump on a goomba or koopa to squash it (a koopa leaves a shell you can kick),
-  touch one and it hurts, a bob-omb lights its fuse when it sees you and blows up. **Cars can flatten them too**, and take
-  a small dent for it; a bob-omb's blast dents and shoves cars. Toggle them with **O**.
+- **Pickups:** SM64's yellow, red and blue coins, Power Stars, the Metal Cap, the Wing Cap and a temporary
+  invincibility star appear around Mario as he moves and fade out behind him. Their models, textures and animation
+  (the coin's spin, the star's turn) are read from your ROM, like Mario's. Coins heal and count on the HUD; a star counts
+  as a star. The caps drop in as they do out of a box, last about ten seconds on the ground, and play SM64's own power-up
+  music while they last (even if you had the music off), then your music comes back (or silence, if it was off).
+  Toggle the pickups with **P**.
+- **Enemies:** goombas (very common), bob-ombs (common) and koopas (rare) wander around Mario. They are SM64's own
+  models and animations from your ROM, and they run the game's own behaviour code (ported from the decompilation):
+  goombas amble, jump and charge at 500 units, bob-ombs patrol, spot you, light their fuse and chase, koopas walk, run
+  from you and lose their shell when hit (then dive back for it; a kicked shell can be ridden). Jump on a goomba to
+  squash it, punch or kick to knock it away; a bob-omb that touches anything blows up, with the game's explosion.
+  They hurt you as in the game (a goomba one wedge). **Cars can hit them too**: a car at speed knocks an enemy away the
+  way a slide kick would, and takes a small dent for it; a bob-omb's blast dents and shoves cars. Toggle them with **O**.
+  Not done yet: picking up and throwing a bob-omb, the dust / smoke puffs, riding a shell's effects.
 - **Settings app:** a small collapsible "NG64 Settings" panel at the top left (beside the HUD) with the pickups and enemies
   switches, a music picker (Off or any of the 34 songs) and a volume slider. To click it you need BeamNG's mouse cursor
   (the UI focus key); P / O and the music keys work without. Your choices are remembered.

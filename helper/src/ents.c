@@ -587,7 +587,7 @@ static int cur_obj_resolve_wall_collisions(Obj *o)
 {
     float radius = o->wallRadius;
     if (radius > 0.1f) {
-        float x = (float)(s16)o->pos[0], y = (float)(s16)o->pos[1], z = (float)(s16)o->pos[2], nx = 0, nz = 0;
+        float x = (float)(int)o->pos[0], y = (float)(int)o->pos[1], z = (float)(int)o->pos[2], nx = 0, nz = 0;   // (the game truncates to s16: BeamNG maps are bigger)
         if (find_walls(&x, &y, &z, 10.0f, radius, &nx, &nz, 0)) {
             o->pos[0] = x; o->pos[1] = y; o->pos[2] = z;
             o->wallAngle = atan2s(nz, nx);
@@ -1865,7 +1865,8 @@ static void spawn_pickup(void)
     int type = pick_weighted(types, weights, 7);
     if (type >= ENT_POWER_STAR && count_ent(type) >= 1) return;
     float p[3];
-    if (!find_spot(p)) return;
+    int ok = find_spot(p);
+    if (!ok) return;
     Obj *o = NULL;
     switch (type) {
     case ENT_COIN_YELLOW: case ENT_COIN_RED: case ENT_COIN_BLUE:

@@ -131,6 +131,16 @@ try:
         dead = [ev for ev in events if ev[0] == 8]
         check(bool(dead) or eid not in ents, "landing on a goomba squashes it (event %s)" % dead[:1])
 
+    # a car runs one over: the mod sends 'c' with the car's heading; the goomba is knocked away and dies
+    teleport(0, 0, 10.5)
+    pump(1.0)
+    eid, e = find(20, 150)
+    if eid is not None:
+        events.clear()
+        s.sendto(b"c" + struct.pack("<HB", eid, 0) + struct.pack("<ff", 8.0, 3.0), dst)
+        pump(1.5)
+        check(any(ev[0] == 8 and ev[1] == eid for ev in events) or eid not in ents, "a car hitting a goomba knocks it off and it dies")
+
     # a bob-omb that sees Mario chases and goes off
     heal = False
     pump(2.0)
