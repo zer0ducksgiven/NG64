@@ -23,6 +23,7 @@ return string.format('%%f %%f %%f %%f %%f %%f %%f %%f %%f %%f %%f %%f', p.x,p.y,
 
 wall = "--wall" in sys.argv
 shots = "--shots" in sys.argv
+broken = "--broken" in sys.argv   # a wreck: every breakgroup broken first
 if shots:
     import shot as shotmod
 base = status()["pos"]
@@ -30,6 +31,9 @@ bx, by, bz = base
 # the car 6 m north of Mario's start, nose east
 lua("if _ng64sp then _ng64sp:delete() end _ng64sp = core_vehicles.spawnNewVehicle('pickup', {pos=vec3(%f,%f,%f), rot=quatFromDir(vec3(1,0,0), vec3(0,0,1)), autoEnterVehicle=false}) return 1" % (bx, by + 8, bz + 0.5))
 time.sleep(5)
+if broken:
+    lua("_ng64sp:queueLuaCommand('beamstate.breakAllBreakgroups()') return 1")
+    time.sleep(4)
 c0 = car_state()
 # Mario beside it, facing it
 lua("ng64.teleport(%f,%f,%f,true) return 1" % (c0[0], c0[1] - 2.2, bz + 0.3))

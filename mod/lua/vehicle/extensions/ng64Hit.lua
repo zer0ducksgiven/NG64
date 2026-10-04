@@ -248,8 +248,11 @@ local function spinStart(mx, my, mz, stubId)
   local base = obj:getPosition()
   local fwd, up = obj:getDirectionVector(), obj:getDirectionVectorUp()
   local right = fwd:cross(up)
+  -- only the main body (the biggest piece still joined up): a wrecked car's loose parts are left where they lie
+  local main = pieces(nodeCount)[1]
+  if not main then main = {} for cid = 0, nodeCount - 1 do main[#main + 1] = cid end end
   local com, mass = vec3(0, 0, 0), 0
-  for cid = 0, nodeCount - 1 do
+  for _, cid in ipairs(main) do
     local m = obj:getNodeMass(cid)
     com = com + (base + obj:getNodePosition(cid)) * m
     mass = mass + m
@@ -257,7 +260,7 @@ local function spinStart(mx, my, mz, stubId)
   if mass <= 0 then return end
   com = com / mass
   local nodes, minF, maxF = {}, math.huge, -math.huge
-  for cid = 0, nodeCount - 1 do
+  for _, cid in ipairs(main) do
     local rel = base + obj:getNodePosition(cid) - com
     local ly = rel:dot(fwd)
     nodes[#nodes + 1] = { cid, obj:getNodeMass(cid), rel:dot(right), ly, rel:dot(up) }

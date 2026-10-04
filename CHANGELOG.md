@@ -8,6 +8,8 @@
   further it goes. Tapping Y still lifts and throws as before.
 - The spinning car collides: if it hits another vehicle, a wall or the ground the spin ends and the car drops, and
   whatever it hit is dented and knocked away.
+- On a wrecked car, holding Y spins its main body even when a loose wheel or panel is nearer (a tap still lifts the
+  nearest part); the loose parts stay where they lie.
 
 ## 0.1.3
 

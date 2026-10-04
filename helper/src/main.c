@@ -1134,7 +1134,7 @@ static struct {
     uint32_t breakVeh;            // the mod says this car hit something
 } s_carry;
 // Y pressed on a car and still down: a tap is the ordinary lift, a hold is the spin grab
-static struct { int on; uint32_t vehId; uint32_t tick; int key; } s_spinPend;
+static struct { int on; uint32_t vehId; uint32_t tick; int key; uint32_t liftVeh; int liftPiece; } s_spinPend;   // vehId: the body a hold spins; liftVeh / liftPiece: what a tap lifts
 static int s_scriptYHold;   // UAT: Y held for this many ticks
 static float s_spinStickAng;   // the keyboard's stand-in for circling the stick
 #define SPIN_HOLD_TICKS 8   // ~0.27 s
@@ -1235,7 +1235,8 @@ static char s_carryMiss[256];   // why the last carry_target found nothing (log)
 // front of him against the footprint only: pinned against a crumpled corner at an angle, or under a bent panel,
 // that point could miss for seconds while he ran on the spot. Anything he's touching always counts.
 #define CARRY_TOUCH_M 0.35f
-static Vehicle *carry_target(const Mario *m, int *pieceOut)
+// onlyBody: consider only the main body of each vehicle (piece 0), not the loose parts of a wreck
+static Vehicle *carry_target(const Mario *m, int *pieceOut, int onlyBody)
 {
     s_carryMiss[0] = 0;
     const struct SM64MarioState *st = &m->state;
@@ -1254,6 +1255,7 @@ static Vehicle *carry_target(const Mario *m, int *pieceOut)
         float lz = d[0] * veh->upB[0] + d[1] * veh->upB[1] + d[2] * veh->upB[2];
         int pieces = veh->isHull ? veh->numHulls : 1;
         for (int h = 0; h < pieces; h++) {
+            if (onlyBody && h != 0) continue;
             float c[3];   // nearest point of the piece's box, world (bng)
             if (veh->isHull) {
                 const Hull *hl = &veh->hulls[h];
@@ -1434,21 +1436,26 @@ static void carry_update(Mario *m, const Pad *pad)
     if (!s_carry.active) {
         if (s_spinPend.on) {
             // Y went down on a car: a tap is the ordinary lift (done when he lets go), a hold is the spin grab
-            Vehicle *pv = vehicle_find(s_spinPend.vehId);
-            if (!pv || (st->action & ACT_FLAG_AIR)) s_spinPend.on = 0;
-            else if (!yNow) { s_spinPend.on = 0; start_lift(m, pv, 0); return; }
+            Vehicle *pv = vehicle_find(s_spinPend.vehId), *lv = vehicle_find(s_spinPend.liftVeh);
+            if (!pv || !lv || (st->action & ACT_FLAG_AIR)) s_spinPend.on = 0;
+            else if (!yNow) { s_spinPend.on = 0; start_lift(m, lv, s_spinPend.liftPiece); return; }
             else if (s_tick - s_spinPend.tick >= SPIN_HOLD_TICKS) { s_spinPend.on = 0; start_spin(m, pv, s_spinPend.key); return; }
             else return;
         }
         if (!yEdge || (st->action & ACT_FLAG_AIR)) return;
-        int piece = 0;
-        v = carry_target(m, &piece);
+        int piece = 0, bodyPiece = 0;
+        v = carry_target(m, &piece, 0);
         if (!v) {
             logf_("Y: nothing in reach (%s)", s_carryMiss);
             return;
         }
-        if (piece != 0) { start_lift(m, v, piece); return; }   // a piece off a wreck is only lifted, never spun
-        s_spinPend.on = 1; s_spinPend.vehId = v->vehId; s_spinPend.tick = s_tick; s_spinPend.key = pad->yKey || s_scriptYHold > 0;
+        // A tap lifts what's nearest (a loose part of a wreck, or the body); a hold spins a car's main body - and in a
+        // wreck the nearest thing is often a wheel or door, so the body is looked for on its own.
+        Vehicle *body = piece == 0 ? v : carry_target(m, &bodyPiece, 1);
+        if (piece != 0) logf_("Y: nearest is a loose part (piece %d); the main body is %s (%s)", piece, body ? "in reach" : "out of reach", s_carryMiss);
+        if (!body) { start_lift(m, v, piece); return; }   // only loose parts in reach: they are only lifted
+        s_spinPend.on = 1; s_spinPend.vehId = body->vehId; s_spinPend.liftVeh = v->vehId; s_spinPend.liftPiece = piece;
+        s_spinPend.tick = s_tick; s_spinPend.key = pad->yKey || s_scriptYHold > 0;
         return;
     }
     if (s_carry.spin) { spin_update(m, v, yNow); return; }
