@@ -683,6 +683,13 @@ local function sendLevelSurfaces()
   local w = { string.char(#water) }
   for _, b in ipairs(water) do w[#w + 1] = packF(b.min[1], b.min[2], b.max[1], b.max[2], b.z) end
   sendRaw("J" .. table.concat(w))
+  if not levelSurfaces then   -- a map that isn't an SM64 port: the water BeamNG draws
+    local beam = world.water()
+    local parts = { string.char(#beam) }
+    for _, b in ipairs(beam) do parts[#parts + 1] = packF(b[1], b[2], b[3], b[4], b[5], b[6], b[7]) end
+    sendRaw("j" .. table.concat(parts))
+    log("I", logTag, string.format("water: %d volumes", #beam))
+  end
 end
 
 local function checkLevel()

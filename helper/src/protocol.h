@@ -32,6 +32,7 @@
 #define MSG_SURFACES  'G'  // u16 chunk, chunks, count; count * {u16 type; i16 force; f32 v[9]} (bng): a level's own SM64
                            // surfaces with their original types (chunks = 0 clears them). Replaces nothing else
 #define MSG_WATER     'J'  // u8 count; count * {f32 x0, y0, x1, y1, z} (bng): water boxes (count = 0: no water)
+#define MSG_WATER_OBB 'j'  // u8 count; count * {f32 cx, cy, halfX, halfY, cosYaw, sinYaw, z} (bng): BeamNG's own water, rotated rectangles
 #define MSG_PART_REQ  'B'  // u32 key; u8 part; u32 hash - the client has no geometry for this part/hash (lost or new)
 
 // helper -> client

@@ -433,6 +433,21 @@ static void load_water(const uint8_t *p, int len)
     logf_("water boxes: %d", n);
 }
 
+#define MAX_WATER_OBB 64
+static float s_waterObb[MAX_WATER_OBB][7];   // cx, cy, halfX, halfY, cos, sin, z (bng): BeamNG's own water
+static int s_waterObbCount;
+
+static void load_water_obb(const uint8_t *p, int len)
+{
+    if (len < 1) return;
+    int n = p[0];
+    if (n > MAX_WATER_OBB) n = MAX_WATER_OBB;
+    if (len < 1 + n * 28) return;
+    memcpy(s_waterObb, p + 1, (size_t)n * 28);
+    s_waterObbCount = n;
+    logf_("water volumes: %d", n);
+}
+
 // water level (sm64 units) at a position in sm64 units; SM64's "no water" below everything otherwise
 static int water_level_at(const float *sp)
 {
@@ -441,6 +456,12 @@ static int water_level_at(const float *sp)
     for (int i = 0; i < s_waterCount; i++) {
         const float *w = s_water[i];
         if (bx >= w[0] && bx <= w[2] && by >= w[1] && by <= w[3] && w[4] / S > best) best = w[4] / S;
+    }
+    for (int i = 0; i < s_waterObbCount; i++) {
+        const float *w = s_waterObb[i];
+        float dx = bx - w[0], dy = by - w[1];
+        float lx = dx * w[4] + dy * w[5], ly = -dx * w[5] + dy * w[4];   // into the rectangle's own axes
+        if (fabsf(lx) <= w[2] && fabsf(ly) <= w[3] && w[6] / S > best) best = w[6] / S;
     }
     return (int)lroundf(best);
 }
@@ -1691,6 +1712,7 @@ static void handle_packet(const uint8_t *p, int len)
     case MSG_MESH_DROP: drop_mesh_cell(p, len); break;
     case MSG_SURFACES: load_level_surfaces(p, len); break;
     case MSG_WATER: load_water(p, len); break;
+    case MSG_WATER_OBB: load_water_obb(p, len); break;
     case MSG_FLOOR_QUERY: {
         // tests: SM64's floor height under each point, to compare with BeamNG's own raycasts
         if (len < 6) break;

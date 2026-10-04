@@ -371,6 +371,28 @@ function M.prefetch(cx, cy, r)
   return #want
 end
 
+-- BeamNG's own water, for Mario to swim in: WaterBlock volumes (the surface is the top of the box, at any yaw) and
+-- WaterPlanes (flat and endless). Each is {centre x, y, half width, half length, cos yaw, sin yaw, surface z}.
+function M.water()
+  local list = {}
+  for _, cls in ipairs({ "WaterBlock", "WaterPlane" }) do
+    for _, name in ipairs(scenetree.findClassObjects(cls) or {}) do
+      local o = scenetree.findObject(name)
+      if o and #list < 64 then
+        local p = o:getPosition()
+        if cls == "WaterPlane" then
+          list[#list + 1] = { p.x, p.y, 1e7, 1e7, 1, 0, p.z }
+        else
+          local s, q = o:getScale(), o:getRotation()
+          local yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+          list[#list + 1] = { p.x, p.y, s.x * 0.5, s.y * 0.5, math.cos(yaw), math.sin(yaw), p.z + s.z * 0.5 }
+        end
+      end
+    end
+  end
+  return list
+end
+
 function M.stats()
   local parsed, pending = 0, 0
   for _, s in pairs(shapes) do if s == "pending" then pending = pending + 1 elseif s then parsed = parsed + 1 end end
