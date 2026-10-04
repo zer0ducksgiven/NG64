@@ -95,3 +95,14 @@ int ng64_hud_write(const char *userPath)
     snprintf(written, sizeof(written), "%s", userPath);
     return 1;
 }
+
+// one of the extracted graphics by name (valid for the life of the process), or 0
+int ng64_hud_image(const char *name, const uint8_t **rgba, int *w, int *h)
+{
+    for (int i = 0; i < s_numImages; i++)
+        if (!strcmp(s_images[i].name, name)) {
+            *rgba = s_images[i].rgba; *w = s_images[i].w; *h = s_images[i].h;
+            return 1;
+        }
+    return 0;
+}

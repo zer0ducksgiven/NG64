@@ -46,6 +46,9 @@ Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\server\NG64\*"; DestDir: "{app}\beammp_server_plugin"; Flags: ignoreversion recursesubdirs
 
 [Registry]
+; where the mod and Mario's picture went, for the uninstaller (the wizard pages don't exist then)
+Root: HKCU; Subkey: "Software\NG64"; ValueType: string; ValueName: "ModsDir"; ValueData: "{code:GetModsDir}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\NG64"; ValueType: string; ValueName: "UserDir"; ValueData: "{code:GetUserDir}"; Flags: uninsdeletekey
 ; the standby watcher, at every sign-in
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "NG64"; ValueData: """{app}\ng64helper.exe"" --watch"; Flags: uninsdeletevalue
 
@@ -62,7 +65,6 @@ Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM ng64helper.exe"; Flags: runh
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
-Type: files; Name: "{code:GetModsDir}\ng64.zip"
 
 [Code]
 const
@@ -113,6 +115,12 @@ end;
 function GetModsDir(Param: String): String;
 begin
   Result := RemoveBackslashUnlessRoot(ModsPage.Values[0]);
+end;
+
+// BeamNG's user folder, the parent of mods: where Mario's vehicle selector picture goes
+function GetUserDir(Param: String): String;
+begin
+  Result := ExtractFileDir(GetModsDir(''));
 end;
 
 // ---- the ROM ---------------------------------------------------------------------------------------------------
@@ -241,6 +249,7 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   Dest: String;
+  ResultCode: Integer;
 begin
   if CurStep = ssPostInstall then
   begin
@@ -250,6 +259,27 @@ begin
     DeleteFile(ExpandConstant('{app}\sm64.us.n64'));
     Dest := ExpandConstant('{app}\sm64.us') + RomExt;
     if not FileCopy(RomPage.Values[0], Dest, False) then
-      MsgBox('Your ROM couldn''t be copied to ' + Dest + '. Copy it there yourself, or run the installer again.', mbError, MB_OK);
+      MsgBox('Your ROM couldn''t be copied to ' + Dest + '. Copy it there yourself, or run the installer again.', mbError, MB_OK)
+    else
+      // Mario's picture for BeamNG's vehicle selector, drawn from the ROM that was just copied (nothing is shipped)
+      Exec(ExpandConstant('{app}\ng64helper.exe'), '--write-preview "' + GetUserDir('') + '" --rom "' + Dest + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
+end;
+
+// The wizard's pages don't exist when uninstalling, so the folders the install used come from the registry (written
+// above). Runs before the uninstaller's own file and registry removal.
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Dir: String;
+begin
+  if CurUninstallStep = usUninstall then
+  begin
+    if RegQueryStringValue(HKCU, 'Software\NG64', 'ModsDir', Dir) then
+      DeleteFile(AddBackslash(Dir) + 'ng64.zip');
+    if RegQueryStringValue(HKCU, 'Software\NG64', 'UserDir', Dir) then
+    begin
+      DelTree(AddBackslash(Dir) + 'vehicles\ng64_mario', True, True, True);
+      DelTree(AddBackslash(Dir) + 'ng64_cache', True, True, True);
+    end;
   end;
 end;

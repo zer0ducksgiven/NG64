@@ -33,6 +33,11 @@ int ng64_hud_write(const char *userPath);
 static int s_hudOk;
 void ng64_audio_stop(void);
 void ng64_audio_stats(long *underruns, long *maxGapMs, long *level);
+uint8_t *ng64_preview_render(const struct SM64MarioGeometryBuffers *geo, const uint8_t *tex, int w, int h);
+int ng64_preview_write(const char *userPath, const uint8_t *img, int w, int h);
+int ng64_tray_start(void);
+void ng64_tray_pump(void);
+void ng64_tray_stop(void);
 void ng64_sm64_lock(void);
 void ng64_sm64_unlock(void);
 // libsm64's audio runs on its own thread (audio.c) and shares state with the calls that start sounds and music: those
@@ -112,6 +117,8 @@ static int s_atlasDirty;
 static char s_atlasFsPath[MAX_PATH];     // real path on disk
 static char s_atlasGamePath[MAX_PATH];   // BeamNG virtual path
 static char s_userPath[MAX_PATH];
+static char s_exePath[MAX_PATH], s_romPathUsed[MAX_PATH];
+static void ensure_preview(const char *userPath);
 
 static int band_for_color(const float *c)
 {
@@ -1674,6 +1681,7 @@ static void handle_packet(const uint8_t *p, int len)
         if (s_hudOk && !ng64_hud_write(s_userPath)) logf_("could not write the HUD graphics into %s\\ng64_cache\\hud", s_userPath);
         send_welcome(1, s_hudOk ? "ok hud" : "ok");
         logf_("hello from mod, user path %s", s_userPath);
+        ensure_preview(s_userPath);
         break;
     }
     case MSG_TERRAIN: load_terrain(p, len); break;
@@ -1845,15 +1853,35 @@ static void handle_packet(const uint8_t *p, int len)
     }
 }
 
+// BeamNG's vehicle selector looks for <user>\vehicles\ng64_mario\default.png. The installer makes it; when it's
+// missing (a by-hand install) a second helper process draws it, so this one's frames don't stall on the render
+static void ensure_preview(const char *userPath)
+{
+    char png[MAX_PATH];
+    snprintf(png, sizeof(png), "%s\\vehicles\\ng64_mario\\default.png", userPath);
+    if (!userPath[0] || !s_exePath[0] || !s_romPathUsed[0] || GetFileAttributesA(png) != INVALID_FILE_ATTRIBUTES) return;
+    char cmd[3 * MAX_PATH];
+    snprintf(cmd, sizeof(cmd), "\"%s\" --write-preview \"%s\" --rom \"%s\"", s_exePath, userPath, s_romPathUsed);
+    STARTUPINFOA si = { sizeof(si) };
+    PROCESS_INFORMATION pi;
+    if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS, NULL, NULL, &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        logf_("drawing the vehicle selector picture into %s\\vehicles\\ng64_mario", userPath);
+    }
+}
+
 int main(int argc, char **argv)
 {
     const char *romPath = NULL;
     int audio = 1, port = NG64_PORT, verbose = 0;
     char exeDir[MAX_PATH], exePath[MAX_PATH];
     int watch = 0;
+    const char *previewDir = NULL;   // --write-preview <user folder>: draw the vehicle selector picture and exit
     DWORD parentPid = 0;
     GetModuleFileNameA(NULL, exeDir, sizeof(exeDir));
     snprintf(exePath, sizeof(exePath), "%s", exeDir);
+    snprintf(s_exePath, sizeof(s_exePath), "%s", exeDir);
     char *slash = strrchr(exeDir, '\\');
     if (slash) *slash = 0;
 
@@ -1863,23 +1891,24 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ignore-focus")) s_ignoreFocus = 1;
         else if (!strcmp(argv[i], "--verbose")) verbose = 1;
+        else if (!strcmp(argv[i], "--write-preview") && i + 1 < argc) previewDir = argv[++i];
         else if (!strcmp(argv[i], "--watch")) watch = 1;                  // standby: start a helper whenever BeamNG runs
         else if (!strcmp(argv[i], "--parent") && i + 1 < argc) parentPid = (DWORD)strtoul(argv[++i], NULL, 10);
     }
     if (watch) return ng64_run_watcher(exePath, exeDir);
     // one helper per port (another would only fight it for the socket), checked before its log is touched
-    if (!ng64_single_instance(port)) return 0;
-    ng64_attach_game(parentPid);   // exits with this game; started by hand, it follows whichever game runs first
+    if (!previewDir && !ng64_single_instance(port)) return 0;
+    if (!previewDir) ng64_attach_game(parentPid);   // exits with this game; started by hand, it follows whichever game runs first
 
     char logPath[MAX_PATH];
     snprintf(logPath, sizeof(logPath), "%s\\ng64helper.log", exeDir);
-    {
+    if (!previewDir) {
         // keep the previous run's log: the watcher starts a new helper every time the game starts
         char oldPath[MAX_PATH];
         snprintf(oldPath, sizeof(oldPath), "%s\\ng64helper.old.log", exeDir);
         MoveFileExA(logPath, oldPath, MOVEFILE_REPLACE_EXISTING);
     }
-    s_log = fopen(logPath, "w");
+    if (!previewDir) s_log = fopen(logPath, "w");
 
     // ROM: --rom, else sm64.us.z64 next to the exe, else any path in rom.txt next to the exe
     char romBuf[MAX_PATH];
@@ -1929,6 +1958,29 @@ int main(int argc, char **argv)
         MessageBoxA(NULL, "NG64 helper could not read Mario's model from your ROM.\n\nIt needs the US version of Super Mario 64 (.z64).", "NG64", MB_ICONERROR);
         return 1;
     }
+    snprintf(s_romPathUsed, sizeof(s_romPathUsed), "%s", romPath);
+    if (previewDir) {
+        // a standing Mario on a flat floor, drawn to <user folder>\vehicles\ng64_mario\{default,mario}.png
+        struct SM64Surface floor[2] = { { 0, 0, 0, { { -2000, 0, -2000 }, { -2000, 0, 2000 }, { 2000, 0, 2000 } } },
+                                        { 0, 0, 0, { { -2000, 0, -2000 }, { 2000, 0, 2000 }, { 2000, 0, -2000 } } } };
+        sm64_static_surfaces_load(floor, 2);
+        int32_t id = sm64_mario_create(0, 0, 0);
+        struct SM64MarioGeometryBuffers geo = { 0 };
+        geo.position = malloc(sizeof(float) * 9 * SM64_GEO_MAX_TRIANGLES);
+        geo.normal = malloc(sizeof(float) * 9 * SM64_GEO_MAX_TRIANGLES);
+        geo.color = malloc(sizeof(float) * 9 * SM64_GEO_MAX_TRIANGLES);
+        geo.uv = malloc(sizeof(float) * 6 * SM64_GEO_MAX_TRIANGLES);
+        struct SM64MarioInputs in = { 0 };
+        struct SM64MarioState st;
+        for (int i = 0; i < 20 && id >= 0; i++) sm64_mario_tick(id, &in, &st, &geo);
+        int ok = 0;
+        if (id >= 0 && geo.numTrianglesUsed) {
+            uint8_t *img = ng64_preview_render(&geo, s_marioTex, 960, 540);
+            ok = img && ng64_preview_write(previewDir, img, 960, 540);
+            free(img);
+        }
+        return ok ? 0 : 1;
+    }
     if (audio) {
         s_audioOk = ng64_audio_start(rom);
         if (!s_audioOk) logf_("audio unavailable - continuing without sound");
@@ -1936,6 +1988,7 @@ int main(int argc, char **argv)
     logf_("libsm64 initialised from %s", romPath);
     s_hudOk = ng64_hud_extract(rom, romLen);
     if (!s_hudOk) logf_("HUD graphics not found in this ROM (not a US ROM?) - the HUD will use plain text");
+    logf_("notification area icon: %s", ng64_tray_start() ? "shown" : "could not be added");
 
     HMODULE xi = LoadLibraryA("xinput1_4.dll");
     if (!xi) xi = LoadLibraryA("xinput9_1_0.dll");
@@ -1968,8 +2021,10 @@ int main(int argc, char **argv)
     uint8_t pkt[65536];
 
     for (;;) {
+        ng64_tray_pump();
         if (ng64_game_closed()) {
             logf_("BeamNG (pid %lu) closed: helper exiting", (unsigned long)ng64_game_pid());
+            ng64_tray_stop();
             if (s_audioOk) ng64_audio_stop();
             return 0;
         }
