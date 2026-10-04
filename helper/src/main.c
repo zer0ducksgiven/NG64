@@ -20,6 +20,7 @@
 #include "update.h"
 #include "ents.h"
 #include "protocol.h"
+#include "objrom.h"
 
 int png_write_rgba(const char *path, const uint8_t *rgba, int w, int h);
 int ng64_audio_start(const uint8_t *rom);
@@ -1277,7 +1278,7 @@ static void ent_tick_local(Mario *m)
     extern uint32_t s_tick;
     ents_tick(s_tick, m->id, &m->state);
     static int lastN;
-    static uint8_t buf[1 + 2 + 48 * 28 + 8];
+    static uint8_t buf[8000];
     buf[0] = MSG_ENTITIES;
     int len = ents_pack(buf + 1, sizeof(buf) - 1);
     uint16_t n;
@@ -1976,6 +1977,42 @@ static void send_frame(Mario *m)
     send_raw(pkt, (int)(sizeof(FrameHeader) + np * sizeof(PartPose)));
 }
 
+// the objects' (pickups, enemies) textures: written next to Mario's atlas, announced to the game after the welcome
+static int s_objOk;
+static char s_objAtlasGamePath[MAX_PATH];
+
+static void send_obj_atlas(void)
+{
+    if (!s_objOk || !s_userPath[0]) return;
+    char dir[MAX_PATH], fs[MAX_PATH];
+    snprintf(dir, sizeof(dir), "%s\\ng64_cache", s_userPath);
+    CreateDirectoryA(dir, NULL);
+    snprintf(fs, sizeof(fs), "%s\\obj_atlas_%lu.png", dir, (unsigned long)GetCurrentProcessId());
+    snprintf(s_objAtlasGamePath, sizeof(s_objAtlasGamePath), "/ng64_cache/obj_atlas_%lu.png", (unsigned long)GetCurrentProcessId());
+    if (!objrom_write_atlas(fs)) { logf_("could not write the object atlas into %s", fs); return; }
+    char buf[MAX_PATH + 2];
+    buf[0] = MSG_OBJ_ATLAS;
+    int n = 1 + snprintf(buf + 1, sizeof(buf) - 1, "%s", s_objAtlasGamePath) + 1;
+    send_raw(buf, n);
+}
+
+// one object piece's geometry, on request (lost or new)
+static void send_obj_piece(int id)
+{
+    const ObjPiece *pc = objrom_piece(id);
+    if (!pc || pc->nv <= 0 || pc->nv > 500) return;
+    static uint8_t buf[8192];
+    uint16_t nv = (uint16_t)pc->nv, ni = (uint16_t)pc->ni, pid = (uint16_t)id;
+    size_t need = 1 + 2 + 1 + 1 + 2 + 2 + (size_t)nv * sizeof(ObjVert) + (size_t)ni * 2;
+    if (need > sizeof(buf)) { logf_("object piece %d too big (%u bytes)", id, (unsigned)need); return; }
+    buf[0] = MSG_OBJ_PIECE;
+    memcpy(buf + 1, &pid, 2); buf[3] = (uint8_t)pc->alpha; buf[4] = (uint8_t)(pc->litTris >= pc->unlitTris);   // lit = shaded by the game's lighting; unlit = drawn flat
+    memcpy(buf + 5, &nv, 2); memcpy(buf + 7, &ni, 2);
+    memcpy(buf + 9, pc->v, (size_t)nv * sizeof(ObjVert));
+    memcpy(buf + 9 + (size_t)nv * sizeof(ObjVert), pc->idx, (size_t)ni * 2);
+    send_raw(buf, (int)need);
+}
+
 static void send_welcome(int ok, const char *msg)
 {
     char buf[1200];
@@ -2064,11 +2101,13 @@ static void handle_packet(const uint8_t *p, int len)
         if (!s_atlasGamePath[0] || s_atlasDirty) write_atlas();
         if (s_hudOk && !ng64_hud_write(s_userPath)) logf_("could not write the HUD graphics into %s\\ng64_cache\\hud", s_userPath);
         send_welcome(1, s_hudOk ? "ok hud" : "ok");
+        send_obj_atlas();
         logf_("hello from mod, user path %s", s_userPath);
         ensure_preview(s_userPath);
         send_options_state();
         break;
     }
+    case MSG_OBJ_REQ: if (len >= 2) { uint16_t id; memcpy(&id, p, 2); send_obj_piece(id); } break;
     case MSG_TERRAIN: load_terrain(p, len); break;
     case MSG_MESH: load_mesh_chunk(p, len); break;
     case MSG_MESH_DROP: drop_mesh_cell(p, len); break;
@@ -2364,6 +2403,10 @@ int main(int argc, char **argv)
         MessageBoxA(NULL, "NG64 helper could not read Mario's model from your ROM.\n\nIt needs the US version of Super Mario 64 (.z64).", "NG64", MB_ICONERROR);
         return 1;
     }
+    // the pickups' and enemies' models: from the ROM as well (without them the game shows nothing for those)
+    s_objOk = objrom_load(rom, romLen, NULL);
+    if (!s_objOk) logf_("WARNING: could not read the object models from '%s' (%s): pickups and enemies will not be drawn", romPath, objrom_error());
+    else logf_("object models read from the ROM: %d pieces", objrom_piece_count());
     snprintf(s_romPathUsed, sizeof(s_romPathUsed), "%s", romPath);
     if (previewDir) {
         // a standing Mario on a flat floor, drawn to <user folder>\vehicles\ng64_mario\{default,mario}.png

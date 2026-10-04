@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define NG64_PORT          47064
-#define NG64_PROTO_VERSION 13
+#define NG64_PROTO_VERSION 14
 
 // BeamNG metres per SM64 unit (same scale sm64-san-andreas uses for GTA).
 #define NG64_SCALE 0.0085f
@@ -35,7 +35,10 @@
 #define MSG_WATER_OBB 'j'  // u8 count; count * {f32 cx, cy, halfX, halfY, cosYaw, sinYaw, z, depth} (bng): BeamNG's own water, rotated rectangles with a surface height and depth
 #define MSG_SPIN_BREAK 'b' // u32 vehId: the car Mario is spinning hit something, he lets go
 #define MSG_FIRE      'k'  // u8 count; count * {f32 x, y, z, radius} (bng): flames near Mario (burning vehicle nodes), refreshed ~10 Hz; none = no fire
-#define MSG_ENTITIES  'n'  // u16 count; count * {u16 id; u8 type; u8 state; f32 x, y, z (bng); f32 yaw (bng); f32 anim; f32 scale}: pickups and enemies
+#define MSG_ENTITIES  'n'  // u16 count; count * {u16 id; u8 type; u8 state; u8 nparts; u8 pad; f32 x, y, z (bng); nparts * {u16 piece; u8 billboard; u8 pad; f32 pos[3]; i16 quat[4]; f32 scale}}: pickups and enemies, each posed as rigid pieces of its ROM model
+#define MSG_OBJ_ATLAS 'z'  // str atlasPath (game-virtual path): the PNG of the textures the object models use
+#define MSG_OBJ_REQ   'y'  // u16 piece: the client has no geometry for this object piece
+#define MSG_OBJ_PIECE 'x'  // u16 piece; u8 alpha; u8 pad; u16 nv, ni; nv * ObjVert (14 bytes: s16 p[3] SM64 units; s8 n[3]; pad; u16 uv[2]); ni * u16
 #define MSG_ENT_EVENT 'v'  // u8 kind; u16 id; f32 a, b, c, d: something happened to / with them (coin, star, cap, explosion...); see ents.h
 #define MSG_OPTIONS   'o'  // u8 pickups, enemies (0/1); u8 song (index, 254 = music off, 255 = leave); u8 volume 0..100 (255 = leave)
 #define MSG_ENT_KILL  'c'  // u16 id; u8 kind: a car ran this enemy over (0), or a shell hit a car (1)

@@ -11,7 +11,7 @@ local world = require("ge/extensions/ng64World")
 local hud = require("ge/extensions/ng64Hud")
 
 local HELPER_HOST, HELPER_PORT = "127.0.0.1", 47064
-local PROTO_VERSION = 13
+local PROTO_VERSION = 14
 local STUB_MODEL = "ng64_mario"
 
 local GRID_N, GRID_SP = 49, 0.5         -- terrain sample grid around Mario (24 m square)
@@ -1074,6 +1074,10 @@ local function handlePacket(data)
     fixes.ents.onEntities(data)
   elseif t == "v" then
     if #data >= 20 then fixes.ents.onEvent(data) end
+  elseif t == "z" then
+    fixes.ents.onAtlas(data)
+  elseif t == "x" then
+    fixes.ents.onPiece(data)
   elseif t == "L" then
     local msg = string.sub(data, 2, -2)
     local longToast = string.match(msg, "^toastl:(.*)")

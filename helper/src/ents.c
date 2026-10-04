@@ -5,6 +5,7 @@
 #include <string.h>
 #include "ents.h"
 #include "protocol.h"
+#include "objrom.h"
 
 #define S NG64_SCALE
 
@@ -429,20 +430,62 @@ void ents_tick(uint32_t tick, int marioId, const struct SM64MarioState *st)
     }
 }
 
+static int ent_model(int type)
+{
+    switch (type) {
+    case ENT_COIN_YELLOW: return OM_COIN_YELLOW;
+    case ENT_COIN_RED: return OM_COIN_RED;
+    case ENT_COIN_BLUE: return OM_COIN_BLUE;
+    case ENT_POWER_STAR: case ENT_STAR_POWER: return OM_STAR;
+    case ENT_CAP_METAL: return OM_CAP_METAL;
+    case ENT_CAP_WING: return OM_CAP_WING;
+    case ENT_GOOMBA: return OM_GOOMBA;
+    case ENT_BOBOMB: return OM_BOBOMB;
+    case ENT_KOOPA: return OM_KOOPA;
+    case ENT_SHELL: return OM_KOOPA_SHELL;
+    }
+    return -1;
+}
+
+#pragma pack(push, 1)
+typedef struct { uint16_t piece; uint8_t flags, pad; float pos[3]; int16_t q[4]; float scale; } PackedPart;
+#pragma pack(pop)
+
 int ents_pack(uint8_t *out, size_t cap)
 {
     uint16_t n = 0;
     uint8_t *p = out + 2;
     for (int i = 0; i < MAX_ENT; i++) {
         Ent *e = &s_ent[i];
-        if (!e->used || (size_t)(p - out) + 28 > cap) continue;
+        int model = e->used ? ent_model(e->type) : -1;
+        if (model < 0) continue;
+        ObjPose pose;
+        memset(&pose, 0, sizeof(pose));
+        memcpy(pose.pos, e->pos, 12);
+        pose.angle[1] = (int16_t)(int)(e->yaw * (65536.0f / 6.2831853f));
+        pose.scale[0] = pose.scale[1] = pose.scale[2] = e->scale;
+        pose.animState = (int)(e->anim * 2.0f) & 7;
+        static const struct { uint32_t table; } anims[] = { [ENT_GOOMBA] = { 0x0801DA4C }, [ENT_BOBOMB] = { 0x0802396C }, [ENT_KOOPA] = { 0x06011364 } };
+        if (e->type == ENT_GOOMBA || e->type == ENT_BOBOMB || e->type == ENT_KOOPA) {
+            pose.anim = objrom_anim_from_table(anims[e->type].table, 0);
+            int ls, le, fl;
+            if (objrom_anim_info(pose.anim, &ls, &le, &fl) && le > 0) pose.animFrame = (int)(e->anim * 2.0f) % le;
+            pose.animState = ((int)(e->anim * 0.3f) % 24 == 0) ? 1 : 0;   // an occasional blink
+        }
+        ObjPart parts[16];
+        int np = objrom_pose(model, &pose, parts, 16);
+        if ((size_t)(p - out) + 18 + (size_t)np * sizeof(PackedPart) > cap) continue;
         float b[3] = { e->pos[0] * S, -e->pos[2] * S, e->pos[1] * S };
-        float yaw = e->yaw - 3.14159265f / 2;   // sm64 yaw -> bng yaw
-        memcpy(p, &e->id, 2); p[2] = e->type; p[3] = e->state; p += 4;
+        memcpy(p, &e->id, 2); p[2] = e->type; p[3] = e->state; p[4] = (uint8_t)np; p[5] = 0; p += 6;
         memcpy(p, b, 12); p += 12;
-        memcpy(p, &yaw, 4); p += 4;
-        memcpy(p, &e->anim, 4); p += 4;
-        memcpy(p, &e->scale, 4); p += 4;
+        for (int k = 0; k < np; k++) {
+            PackedPart pp;
+            pp.piece = (uint16_t)parts[k].piece; pp.flags = (uint8_t)parts[k].billboard; pp.pad = 0;
+            memcpy(pp.pos, parts[k].pos, 12);
+            for (int c = 0; c < 4; c++) pp.q[c] = (int16_t)(parts[k].quat[c] * 32767.0f);
+            pp.scale = parts[k].scale;
+            memcpy(p, &pp, sizeof(pp)); p += sizeof(pp);
+        }
         n++;
     }
     memcpy(out, &n, 2);
