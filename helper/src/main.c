@@ -18,6 +18,7 @@
 #include "libsm64.h"
 #include "pad.h"
 #include "update.h"
+#include "ents.h"
 #include "protocol.h"
 
 int png_write_rgba(const char *path, const uint8_t *rgba, int w, int h);
@@ -35,6 +36,7 @@ int ng64_hud_write(const char *userPath);
 static int s_hudOk;
 void ng64_audio_stop(void);
 void ng64_audio_stats(long *underruns, long *maxGapMs, long *level);
+void ng64_audio_set_volume(int pct);
 uint8_t *ng64_preview_render(const struct SM64MarioGeometryBuffers *geo, const uint8_t *tex, int w, int h);
 int ng64_preview_write(const char *userPath, const uint8_t *img, int w, int h);
 int ng64_tray_start(void);
@@ -52,6 +54,9 @@ extern uint32_t s_tick;   // simulation tick, defined with the frame sender
 #define S  NG64_SCALE
 
 // sm64 action/flag bits we care about (decomp include/sm64.h)
+#define MARIO_VANISH_CAP      0x00000002
+#define MARIO_METAL_CAP       0x00000004
+#define MARIO_WING_CAP        0x00000008
 #define MARIO_PUNCHING        0x00100000
 #define MARIO_KICKING         0x00200000
 #define MARIO_TRIPPING        0x00400000
@@ -1189,6 +1194,125 @@ static void send_toast(const char *msg)
 }
 
 
+// ---- pickups and enemies (ents.c): options, the keys, and what they need from the world ---------------------------------
+static int s_volumePct = 100;
+static char s_settingsPath[MAX_PATH];
+
+static void save_settings(void)
+{
+    if (!s_settingsPath[0]) return;
+    FILE *f = fopen(s_settingsPath, "w");
+    if (!f) return;
+    int p, e;
+    ents_get_options(&p, &e);
+    fprintf(f, "pickups=%d\nenemies=%d\nvolume=%d\n", p, e, s_volumePct);
+    fclose(f);
+}
+
+static void load_settings(void)
+{
+    int p = 1, e = 1;
+    FILE *f = fopen(s_settingsPath, "r");
+    if (f) {
+        char line[64];
+        while (fgets(line, sizeof(line), f)) {
+            int v;
+            if (sscanf(line, "pickups=%d", &v) == 1) p = v != 0;
+            else if (sscanf(line, "enemies=%d", &v) == 1) e = v != 0;
+            else if (sscanf(line, "volume=%d", &v) == 1) s_volumePct = v < 0 ? 0 : v > 100 ? 100 : v;
+        }
+        fclose(f);
+    }
+    ents_set_options(p, e);
+    ng64_audio_set_volume(s_volumePct);
+}
+
+// the settings app follows whatever changed them (a key, the app itself)
+static void send_options_state(void)
+{
+    int p, e;
+    ents_get_options(&p, &e);
+    uint8_t b[1 + 1 + 2 + 16];
+    uint16_t id = 0;
+    float v[4] = { (float)p, (float)e, s_musicOn ? (float)s_song : -1.0f, (float)s_volumePct };
+    b[0] = MSG_ENT_EVENT; b[1] = 9;
+    memcpy(b + 2, &id, 2);
+    memcpy(b + 4, v, 16);
+    send_raw(b, sizeof(b));
+}
+
+static void ent_event(int kind, int id, float x, float y, float z, float d)
+{
+    uint8_t b[1 + 1 + 2 + 16];
+    uint16_t id16 = (uint16_t)id;
+    float v[4] = { x, y, z, d };
+    b[0] = MSG_ENT_EVENT; b[1] = (uint8_t)kind;
+    memcpy(b + 2, &id16, 2);
+    memcpy(b + 4, v, 16);
+    send_raw(b, sizeof(b));
+}
+
+static int ent_floor(float x, float y, float z, float *floorY, float *normalY)
+{
+    struct SM64SurfaceCollisionData *fl = NULL;
+    float h = sm64_surface_find_floor(x, y, z, &fl);
+    if (!fl) return 0;
+    *floorY = h;
+    *normalY = fl->normal.y;
+    return 1;
+}
+
+// not a place to put something: inside (or hard against) a vehicle, or under water
+static int ent_blocked(float x, float y, float z, float floorY)
+{
+    float pt[3] = { x, y, z }, closest[3];
+    for (int i = 0; i < MAX_VEH; i++)
+        if (s_veh[i].used && point_near_box(&s_veh[i], pt, 120, closest)) return 1;
+    float sp[3] = { x, floorY + 5, z };
+    return water_level_at(sp) > floorY - 20;
+}
+
+static void ent_tick_local(Mario *m)
+{
+    extern uint32_t s_tick;
+    ents_tick(s_tick, m->id, &m->state);
+    static int lastN;
+    static uint8_t buf[1 + 2 + 48 * 28 + 8];
+    buf[0] = MSG_ENTITIES;
+    int len = ents_pack(buf + 1, sizeof(buf) - 1);
+    uint16_t n;
+    memcpy(&n, buf + 1, 2);
+    if (n || lastN) send_raw(buf, 1 + len);
+    lastN = n;
+}
+
+// P toggles the pickups, O the enemies (while the game has focus and the player is Mario)
+static void read_toggles(void)
+{
+    static int prevP, prevO;
+    int p = 0, o = 0;
+    if ((s_ignoreFocus || s_gameFocused) && s_inputEnabled) {
+        p = (GetAsyncKeyState('P') & 0x8000) != 0;
+        o = (GetAsyncKeyState('O') & 0x8000) != 0;
+    }
+    int pk, en;
+    ents_get_options(&pk, &en);
+    if (p && !prevP) { ents_set_options(!pk, en); send_toast(!pk ? "Pickups on" : "Pickups off"); save_settings(); send_options_state(); }
+    if (o && !prevO) { ents_set_options(pk, !en); send_toast(!en ? "Enemies on" : "Enemies off"); save_settings(); send_options_state(); }
+    prevP = p; prevO = o;
+}
+
+// the music a power-up plays while it lasts (SM64's own): metal cap, wing cap, and the invincibility star
+static int music_override(void)
+{
+    Mario *m = mario_find(0);
+    if (!m) return 0;
+    if (m->state.flags & MARIO_METAL_CAP) return 0x0F;                       // Metallic Mario
+    if (m->state.flags & (MARIO_WING_CAP | MARIO_VANISH_CAP)) return 0x0E;   // Powerful Mario
+    if (ents_star_active()) return 0x14;                                     // Race Fanfare
+    return 0;
+}
+
 // Back (M) toggles the music, on release; held with RB / LB (or ] / [ on the keyboard) it changes song instead.
 // While Back is held the bumpers don't zoom the camera.
 static void music_update(Pad *pad)
@@ -1218,14 +1342,21 @@ static void music_update(Pad *pad)
     if (!held) s_musicCombo = 0;
     s_prevMusic = held;
     s_scriptMusic = 0;
-    int want = s_audioOk && s_musicOn && s_inputEnabled && mario_find(0) != NULL;
-    if (want && !s_musicPlaying) {
+    // what should be playing: a power-up's own music while it lasts (even with the music muted), otherwise the chosen song
+    // if the music is on. When a power-up ends this falls back to that - playing again, or silent if it was muted.
+    int ov = music_override();
+    int wantSeq = 0;
+    if (s_audioOk && s_inputEnabled && mario_find(0) != NULL) wantSeq = ov ? ov : (s_musicOn ? s_songs[s_song].seq : 0);
+    static int playingSeq;
+    int want = wantSeq != 0;
+    if (want && (!s_musicPlaying || wantSeq != playingSeq)) {
         ng64_sm64_lock();
-        sm64_ng64_music_play(s_songs[s_song].seq);
+        sm64_ng64_music_play((uint8_t)wantSeq);
         uint32_t ms = sm64_ng64_music_status();
         ng64_sm64_unlock();
         s_musicPlaying = 1;
-        logf_("music playing (sequence 0x%02x; player has 0x%02x, queue %u)", s_songs[s_song].seq, ms & 0xFF, ms >> 16);
+        playingSeq = wantSeq;
+        logf_("music playing (sequence 0x%02x%s; player has 0x%02x, queue %u)", wantSeq, ov ? ", a power-up's" : "", ms & 0xFF, ms >> 16);
     } else if (!want && s_musicPlaying) {
         SM64_AUDIO_SAFE(sm64_ng64_music_stop(30));   // one-second fade
         s_musicPlaying = 0;
@@ -1935,6 +2066,7 @@ static void handle_packet(const uint8_t *p, int len)
         send_welcome(1, s_hudOk ? "ok hud" : "ok");
         logf_("hello from mod, user path %s", s_userPath);
         ensure_preview(s_userPath);
+        send_options_state();
         break;
     }
     case MSG_TERRAIN: load_terrain(p, len); break;
@@ -1944,6 +2076,19 @@ static void handle_packet(const uint8_t *p, int len)
     case MSG_WATER: load_water(p, len); break;
     case MSG_WATER_OBB: load_water_obb(p, len); break;
     case MSG_FIRE: load_fire(p, len); break;
+    case MSG_OPTIONS:
+        if (len >= 4) {
+            int pk, en;
+            ents_get_options(&pk, &en);
+            ents_set_options(p[0] != 0, p[1] != 0);
+            if (p[2] == 254) { if (s_musicOn) { s_musicOn = 0; logf_("music off (settings)"); } }
+            else if (p[2] < NUM_SONGS) { s_song = p[2]; s_musicOn = 1; s_musicPlaying = 0; logf_("song %d: %s (settings)", s_song + 1, s_songs[s_song].name); }
+            if (p[3] <= 100) { s_volumePct = p[3]; ng64_audio_set_volume(s_volumePct); }
+            save_settings();
+            send_options_state();
+        }
+        break;
+    case MSG_ENT_KILL: if (len >= 3) { uint16_t id; memcpy(&id, p, 2); ents_car_kill(id, p[2]); } break;
     case MSG_SPIN_BREAK: if (len >= 4) memcpy(&s_carry.breakVeh, p, 4); break;
     case MSG_FLOOR_QUERY: {
         // tests: SM64's floor height under each point, to compare with BeamNG's own raycasts
@@ -1990,7 +2135,8 @@ static void handle_packet(const uint8_t *p, int len)
     case MSG_HULL: load_hull(p, len); break;
     case MSG_HURT: {
         Mario *m = mario_find(0);
-        if (m && len >= 14) {
+        // a star, or a metal / vanish cap, takes the hit like SM64's invincible Mario
+        if (m && len >= 14 && !ents_star_active() && !(m->state.flags & (MARIO_METAL_CAP | MARIO_VANISH_CAP))) {
             float sp[3];
             bng2sm((const float *)p, sp);
             SM64_AUDIO_SAFE(sm64_mario_take_damage(m->id, p[12], p[13] ? 0x00000008 /* INT_SUBTYPE_BIG_KNOCKBACK */ : 0, sp[0], sp[1], sp[2]));
@@ -2251,6 +2397,12 @@ int main(int argc, char **argv)
     logf_("notification area icon: %s", ng64_tray_start() ? "shown" : "could not be added");
     if (!noUpdateCheck) ng64_update_start(exeDir);
     {
+        EntHost host = { ent_floor, ent_blocked, ent_event, ng64_sm64_lock, ng64_sm64_unlock };
+        ents_init(&host);
+        snprintf(s_settingsPath, sizeof(s_settingsPath), "%s\\ng64settings.txt", exeDir);
+        load_settings();
+    }
+    {
         char ini[MAX_PATH];
         snprintf(ini, sizeof(ini), "%s\\controller.ini", exeDir);
         ng64_dinput_init(di_log, ini);
@@ -2339,6 +2491,7 @@ int main(int argc, char **argv)
         Pad pad;
         read_pad(&pad);
         if (!s_inputEnabled) memset(&pad, 0, sizeof(pad));
+        read_toggles();
         music_update(&pad);
         update_notice();
         mesh_update();
@@ -2404,6 +2557,7 @@ int main(int argc, char **argv)
             if (m->key == 0) {
                 update_camera(m, &pad, (float)tickSec);
                 check_fire(m);
+                ent_tick_local(m);
                 carry_update(m, &pad);
                 check_attacks(m);
                 check_landing(m);

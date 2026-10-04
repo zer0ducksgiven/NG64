@@ -1,0 +1,18 @@
+{
+  "domElement": "<ng64-settings></ng64-settings>",
+  "name": "NG64 Settings",
+  "types": ["ui.apps.categories.vehicle_info"],
+  "description": "NG64 Mario's settings: SM64 pickups and enemies on/off, the music and its volume. Collapses to a small title bar.",
+  "css": {
+    "top": "120px",
+    "left": "10px",
+    "width": "230px",
+    "height": "250px"
+  },
+  "author": "NG64",
+  "version": "1.0",
+  "directive": "ng64Settings",
+  "category": "General",
+  "isAuxiliary": false,
+  "interactive": "yes"
+}

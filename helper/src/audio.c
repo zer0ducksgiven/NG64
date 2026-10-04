@@ -24,6 +24,7 @@ static uint32_t s_targetFrames;
 
 // stats, read from the main thread (logged there: the audio thread never touches the log file)
 static volatile LONG s_underruns, s_maxGapMs, s_level;
+static volatile LONG s_volumePct = 100;   // the settings app's slider
 
 // libsm64's audio tick shares state with the calls that start sounds and music on the main thread; they take this
 static CRITICAL_SECTION s_lock;
@@ -86,6 +87,15 @@ static DWORD WINAPI audio_thread(LPVOID arg)
             ng64_sm64_lock();
             uint32_t n = sm64_audio_tick(queued, s_targetFrames, buf);
             ng64_sm64_unlock();
+            {   // the volume slider: a master gain, eased so a drag is not zipper noise
+                static float gain = 1.0f;
+                float target = s_volumePct / 100.0f;
+                for (uint32_t i = 0; i < n * 4 && i < BUF_FRAMES * 2; i += 2) {
+                    gain += (target - gain) * 0.002f;
+                    buf[i] = (int16_t)(buf[i] * gain);
+                    buf[i + 1] = (int16_t)(buf[i + 1] * gain);
+                }
+            }
 
             // output level, over ~5 s: shows whether anything (music, sounds) is actually being played
             for (uint32_t i = 0; i < n * 4 && i < BUF_FRAMES * 2; i++) { sum += (double)buf[i] * buf[i]; count++; }
@@ -147,6 +157,8 @@ void ng64_audio_stop(void)
     waveOutClose(s_wave);
     CloseHandle(s_event);
 }
+
+void ng64_audio_set_volume(int pct) { s_volumePct = pct < 0 ? 0 : pct > 100 ? 100 : pct; }
 
 void ng64_audio_stats(long *underruns, long *maxGapMs, long *level)
 {

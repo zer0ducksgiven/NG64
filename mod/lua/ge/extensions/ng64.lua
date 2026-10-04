@@ -11,7 +11,7 @@ local world = require("ge/extensions/ng64World")
 local hud = require("ge/extensions/ng64Hud")
 
 local HELPER_HOST, HELPER_PORT = "127.0.0.1", 47064
-local PROTO_VERSION = 12
+local PROTO_VERSION = 13
 local STUB_MODEL = "ng64_mario"
 
 local GRID_N, GRID_SP = 49, 0.5         -- terrain sample grid around Mario (24 m square)
@@ -854,7 +854,7 @@ function fixes.burnEffect(action, dt)
   end
 end
 fixes.marioBlockedActions = {
-  "toggleBigMap", "pause", "toggleRadialMenuMulti", "parkingbrake", "steadycamJump",
+  "toggleBigMap", "pause", "toggleRadialMenuMulti", "parkingbrake", "parkingbrake_toggle", "steadycamJump",
   "moveforward", "movebackward", "moveleft", "moveright",
   "accelerate", "brake", "steer_left", "steer_right",
   -- BeamNG's own camera turning: it fights Mario's camera, and each turn wakes its vehicle-trigger crosshair
@@ -1070,6 +1070,10 @@ local function handlePacket(data)
     floorReply = out
   elseif t == "P" then
     -- keepalive reply
+  elseif t == "n" then
+    fixes.ents.onEntities(data)
+  elseif t == "v" then
+    if #data >= 20 then fixes.ents.onEvent(data) end
   elseif t == "L" then
     local msg = string.sub(data, 2, -2)
     local longToast = string.match(msg, "^toastl:(.*)")
@@ -1270,6 +1274,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     checkVehicleHurt(pos, lastLocalFrame.vel, dt)
     fixes.tellTraffic(pos, lastLocalFrame)
     fixes.sendFire(pos, dt)
+    fixes.ents.update(dt, pos)
     fixes.burnEffect(lastLocalFrame.action, dt)
     fixes.checkUnderTerrain(pos)
     sendMpState(dt)
@@ -1365,6 +1370,7 @@ local function onClientEndMission()
   meshLevel = nil
   cells, meshTris = {}, 0
   world.reset()
+  fixes.ents.reset()
 end
 
 -- UAT / console helpers
@@ -1410,6 +1416,15 @@ M.teleport = teleport
 M.getStatus = getStatus
 -- SM64 HUD: lives, coins, stars (ng64.hud.collectCoin / collectStar / addLife, for maps and other mods)
 M.hud = hud
+-- pickups / enemies / music settings (the NG64 settings app calls these)
+fixes.ents = require("ge/extensions/ng64Ents")
+fixes.ents.init({
+  sendRaw = sendRaw, hud = hud, stubId = function() return stubId end,
+  toast = function(msg) guihooks.trigger("toastrMsg", { type = "info", title = "NG64", msg = msg }) lastToast = msg end,
+})
+M.ents = fixes.ents
+M.setOption = fixes.ents.setOption
+M.resendSettings = fixes.ents.resendSettings
 M.onGameStateUpdate = hud.onGameStateUpdate
 hud.setHealer(function(healCounter) sendRaw("h" .. string.char(math.max(0, math.min(255, healCounter)))) end)
 -- tests: hurt Mario by this many wedges, from a point beside him

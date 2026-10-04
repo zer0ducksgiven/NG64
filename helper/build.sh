@@ -20,6 +20,7 @@ grep -q 'sm64_mario_pick_up' src/libsm64.c || patch -p1 -s < '$HERE/patches/libs
 grep -q 'sm64_ng64_music_play' src/libsm64.c || patch -p1 -s < '$HERE/patches/libsm64-music.patch'
 grep -q 'sm64_mario_grab_bowser' src/libsm64.c || patch -p1 -s < '$HERE/patches/libsm64-spin.patch'
 grep -q 'sm64_mario_burn' src/libsm64.c || patch -p1 -s < '$HERE/patches/libsm64-burn.patch'
+grep -q 'sm64_ng64_play_sound' src/libsm64.c || patch -p1 -s < '$HERE/patches/libsm64-sound.patch'
 grep -q 'g_ng64PartCount' src/gfx_adapter.c || patch -p1 -s < '$HERE/patches/libsm64-parts.patch'
 grep -q 'read from the player' Makefile || patch -p1 -s < '$HERE/patches/libsm64-rommodel.patch'
 # anything ever downloaded from the decomp goes, sources and objects, so it can't end up in the helper
@@ -28,7 +29,7 @@ make lib CC=gcc -j8 >/dev/null
 cd '$HERE' && mkdir -p dist
 gcc -O2 -Wall -Wno-unused-function -DGBI_FLOATS -DSM64_LIB_EXPORT -DVERSION_US -DNO_SEGMENTED_MEMORY \
   -I../libsm64-master/src -I../libsm64-master/src/decomp/include -o $OUT \
-  src/main.c src/png.c src/preview.c src/update.c src/tray.c src/dinput.c src/pad_map.c $AUDIO_C src/hud.c src/mario_rom_geo.c src/mario_rom_dl.c src/lifecycle.c src/rom_format.c \$(ls ../libsm64-master/build/src/*.o ../libsm64-master/build/src/decomp/*/*.o ../libsm64-master/build/src/decomp/*.o ../libsm64-master/build/src/decomp/*/*/*.o 2>/dev/null) \
+  src/main.c src/png.c src/preview.c src/ents.c src/update.c src/tray.c src/dinput.c src/pad_map.c $AUDIO_C src/hud.c src/mario_rom_geo.c src/mario_rom_dl.c src/lifecycle.c src/rom_format.c \$(ls ../libsm64-master/build/src/*.o ../libsm64-master/build/src/decomp/*/*.o ../libsm64-master/build/src/decomp/*.o ../libsm64-master/build/src/decomp/*/*/*.o 2>/dev/null) \
   -static -mwindows -lws2_32 -lwinmm -lwinhttp -lshell32 -lgdi32 -luser32 -ldinput8 -ldxguid -lole32 -loleaut32 -lm
 "
 echo built "$HERE/$OUT"

@@ -1,0 +1,26 @@
+--- a/src/libsm64.c
++++ b/src/libsm64.c
+@@ -845,3 +845,11 @@
+     drop_and_set_mario_action( m, ( ( m->action & ACT_FLAG_AIR ) && m->vel[1] <= 0.0f ) ? ACT_BURNING_FALL : ACT_BURNING_JUMP, 1 );
+     return true;
+ }
++
++// ---- NG64: sounds of things that aren't SM64 objects (coins, stars, explosions) -----------------------------------
++// Plays an SM64 sound (SOUND_ARG_LOAD bits) at no particular place: full volume, centred.
++extern f32 gGlobalSoundSource[3];
++SM64_LIB_FN void sm64_ng64_play_sound(uint32_t soundBits)
++{
++    play_sound( soundBits, gGlobalSoundSource );
++}
+--- a/src/libsm64.h
++++ b/src/libsm64.h
+@@ -198,6 +198,9 @@
+ // NG64 addition: catch fire (SM64's burning pain action); false if he is in water, wears a metal / vanish cap, or is already burning or hurt
+ extern SM64_LIB_FN bool sm64_mario_burn(int32_t marioId);
+ 
++// NG64 addition: play an SM64 sound (SOUND_ARG_LOAD bits) at full volume, centred
++extern SM64_LIB_FN void sm64_ng64_play_sound(uint32_t soundBits);
++
+ extern SM64_LIB_FN uint32_t sm64_surface_object_create( const struct SM64SurfaceObject *surfaceObject );
+ extern SM64_LIB_FN void sm64_surface_object_move( uint32_t objectId, const struct SM64ObjectTransform *transform );
+ extern SM64_LIB_FN void sm64_surface_object_delete( uint32_t objectId );
