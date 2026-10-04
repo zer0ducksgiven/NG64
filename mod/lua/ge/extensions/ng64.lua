@@ -1282,7 +1282,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     fixes.burnEffect(lastLocalFrame.action, dt)
     fixes.checkUnderTerrain(pos)
     sendMpState(dt)
-    if controlled then applyCamera() end
+    if controlled and not fixes.holdCamera then applyCamera() end
     prof("camera")
     followStub(stub, pos)
     prof("stub")
@@ -1427,6 +1427,11 @@ fixes.ents.init({
   toast = function(msg) guihooks.trigger("toastrMsg", { type = "info", title = "NG64", msg = msg }) lastToast = msg end,
 })
 M.ents = fixes.ents
+-- tests: hold the camera still (the free camera can then be placed), and put a ROM model on show in front of Mario
+M.holdCamera = function(on) fixes.holdCamera = on end
+M.showModel = function(model, x, y, z, yawDeg, animState, animIdx, frame)
+  sendRaw("u" .. string.char(model) .. packF(x, y, z) .. packI16(math.floor((yawDeg or 0) * 65536 / 360) % 65536 - (((yawDeg or 0) * 65536 / 360) % 65536 >= 32768 and 65536 or 0)) .. string.char(animState or 0, animIdx or 255) .. packI16(frame or 0))
+end
 M.setOption = fixes.ents.setOption
 M.resendSettings = fixes.ents.resendSettings
 M.onGameStateUpdate = hud.onGameStateUpdate

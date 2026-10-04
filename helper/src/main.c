@@ -2008,7 +2008,7 @@ static void send_obj_piece(int id)
     size_t need = 1 + 2 + 1 + 1 + 2 + 2 + (size_t)nv * sizeof(ObjVert) + (size_t)ni * 2;
     if (need > sizeof(buf)) { logf_("object piece %d too big (%u bytes)", id, (unsigned)need); return; }
     buf[0] = MSG_OBJ_PIECE;
-    memcpy(buf + 1, &pid, 2); buf[3] = (uint8_t)pc->alpha; buf[4] = (uint8_t)(pc->litTris >= pc->unlitTris);   // lit = shaded by the game's lighting; unlit = drawn flat
+    memcpy(buf + 1, &pid, 2); buf[3] = (uint8_t)pc->alpha; buf[4] = 0;   // everything is drawn flat: SM64's shading is baked into the atlas
     memcpy(buf + 5, &nv, 2); memcpy(buf + 7, &ni, 2);
     memcpy(buf + 9, pc->v, (size_t)nv * sizeof(ObjVert));
     memcpy(buf + 9 + (size_t)nv * sizeof(ObjVert), pc->idx, (size_t)ni * 2);
@@ -2109,6 +2109,15 @@ static void handle_packet(const uint8_t *p, int len)
         send_options_state();
         break;
     }
+    case MSG_OBJ_SHOW:
+        if (len >= 17) {
+            float b[3], sp[3]; int16_t yaw, frame;
+            memcpy(b, p + 1, 12); memcpy(&yaw, p + 13, 2);
+            bng2sm(b, sp);
+            frame = len >= 19 ? (int16_t)(p[17] | p[18] << 8) : 0;
+            ents_debug_show(p[0], sp, yaw, len > 15 ? p[15] : 0, len > 16 ? p[16] : 255, frame);
+        }
+        break;
     case MSG_OBJ_REQ: if (len >= 2) { uint16_t id; memcpy(&id, p, 2); send_obj_piece(id); } break;
     case MSG_TERRAIN: load_terrain(p, len); break;
     case MSG_MESH: load_mesh_chunk(p, len); break;

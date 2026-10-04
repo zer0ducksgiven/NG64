@@ -159,10 +159,11 @@ static int decode_texture(uint32_t addr, int fmt, int siz, int w, int h, uint8_t
 }
 
 // a texture, tinted by a colour (lit surfaces take their light's colour), in the atlas; with 1 px of replicated border
+static int s_texGain = 100;   // percent: an environment map is brightened, SM64's reflections being brighter than their texture
 static Rect *atlas_texture(uint32_t addr, int fmt, int siz, int w, int h, const uint8_t tint[3], int opaque)
 {
     uint64_t key = (uint64_t)addr << 30 ^ ((uint64_t)fmt << 27) ^ ((uint64_t)siz << 25) ^ ((uint64_t)w << 17) ^ ((uint64_t)h << 9)
-                 ^ ((uint64_t)tint[0] << 40) ^ ((uint64_t)tint[1] << 48) ^ ((uint64_t)tint[2] << 56) ^ (opaque ? 1 : 0);
+                 ^ ((uint64_t)tint[0] << 40) ^ ((uint64_t)tint[1] << 48) ^ ((uint64_t)tint[2] << 56) ^ (opaque ? 1 : 0) ^ ((uint64_t)s_texGain << 20);
     key &= ~(1ull << 62);
     Rect *e = rect_find(key);
     if (e) return e;
@@ -171,9 +172,9 @@ static Rect *atlas_texture(uint32_t addr, int fmt, int siz, int w, int h, const 
     uint8_t *px = malloc((size_t)w * h * 4);
     if (!decode_texture(addr, fmt, siz, w, h, px)) { free(px); return NULL; }
     for (int i = 0; i < w * h; i++) {
-        px[i * 4] = (uint8_t)(px[i * 4] * tint[0] / 255);
-        px[i * 4 + 1] = (uint8_t)(px[i * 4 + 1] * tint[1] / 255);
-        px[i * 4 + 2] = (uint8_t)(px[i * 4 + 2] * tint[2] / 255);
+        { int v = px[i * 4] * tint[0] / 255 * s_texGain / 100; px[i * 4] = (uint8_t)(v > 255 ? 255 : v); }
+        { int v = px[i * 4 + 1] * tint[1] / 255 * s_texGain / 100; px[i * 4 + 1] = (uint8_t)(v > 255 ? 255 : v); }
+        { int v = px[i * 4 + 2] * tint[2] / 255 * s_texGain / 100; px[i * 4 + 2] = (uint8_t)(v > 255 ? 255 : v); }
         if (opaque) px[i * 4 + 3] = 255;
     }
     atlas_put(x, y, w, h, px, TEX_MARGIN);
@@ -198,6 +199,8 @@ typedef struct {
     int texOn; uint32_t scaleS, scaleT;
     uint32_t geom;
     uint8_t diffuse[3], ambient[3];
+    int8_t lightDir[3];
+    int shadeUsed;      // the colour combiner (G_SETCOMBINE) includes the shade colour: lights or vertex colours tint the texture
     SVtx vtx[16];
     ObjPiece *piece;
     int opaque;
@@ -233,6 +236,29 @@ static void piece_add_vertex(GfxState *g, const SVtx *v, Rect *rc, float s, floa
 
 static int s_oorTris;
 
+typedef struct { float p[3], s, t; int src; } CV;   // a corner of a triangle being cut; src = which original vertex gives its colour
+
+// splits a convex polygon along s (axis 0) or t (axis 1) = lim: lo gets what is <= lim, hi what is >= lim
+static void split_poly(const CV *in, int n, int axis, float lim, CV *lo, int *nlo, CV *hi, int *nhi)
+{
+    *nlo = *nhi = 0;
+    for (int i = 0; i < n; i++) {
+        const CV *a = &in[i], *b = &in[(i + 1) % n];
+        float ca = axis == 0 ? a->s : a->t, cb = axis == 0 ? b->s : b->t;
+        if (ca <= lim && *nlo < 11) lo[(*nlo)++] = *a;
+        if (ca >= lim && *nhi < 11) hi[(*nhi)++] = *a;
+        if ((ca < lim && cb > lim) || (ca > lim && cb < lim)) {
+            float f = (lim - ca) / (cb - ca);
+            CV m;
+            for (int k = 0; k < 3; k++) m.p[k] = a->p[k] + (b->p[k] - a->p[k]) * f;
+            m.s = a->s + (b->s - a->s) * f; m.t = a->t + (b->t - a->t) * f;
+            m.src = f < 0.5f ? a->src : b->src;
+            if (*nlo < 11) lo[(*nlo)++] = m;
+            if (*nhi < 11) hi[(*nhi)++] = m;
+        }
+    }
+}
+
 static void emit_tri(GfxState *g, int a, int b, int c)
 {
     int idx[3], ids[3] = { a, b, c };
@@ -242,6 +268,18 @@ static void emit_tri(GfxState *g, int a, int b, int c)
     float st[3][2] = { { 0 } };
     uint8_t white[3] = { 255, 255, 255 };
     int textured = g->texOn && g->loaded;
+    // lit surfaces: SM64's shade (ambient + diffuse * N.L) is baked into the texture, one flat level per triangle: BeamNG's
+    // sun would leave whichever side faces away from it black, and has no ambient to soften that
+    uint8_t shade[3] = { 255, 255, 255 };
+    if (lit) {
+        float nx = 0, ny = 0, nz = 0;
+        for (int i = 0; i < 3; i++) { nx += (int8_t)vs[i]->c[0]; ny += (int8_t)vs[i]->c[1]; nz += (int8_t)vs[i]->c[2]; }
+        float nl = sqrtf(nx * nx + ny * ny + nz * nz), ll = sqrtf((float)(g->lightDir[0] * g->lightDir[0] + g->lightDir[1] * g->lightDir[1] + g->lightDir[2] * g->lightDir[2]));
+        float ndl = (nl > 0 && ll > 0) ? (nx * g->lightDir[0] + ny * g->lightDir[1] + nz * g->lightDir[2]) / (nl * ll) : 0;
+        if (ndl < 0) ndl = 0;
+        ndl = floorf(ndl * 8.0f + 0.5f) / 8.0f;
+        for (int k = 0; k < 3; k++) { int v = (int)(g->ambient[k] + g->diffuse[k] * ndl); shade[k] = (uint8_t)(v > 255 ? 255 : v); }
+    }
     if (textured) {
         int t = 0;
         int w = g->tile[t].w, h = g->tile[t].h;
@@ -249,8 +287,10 @@ static void emit_tri(GfxState *g, int a, int b, int c)
         if (h <= 0) h = g->tile[t].maskT ? 1 << g->tile[t].maskT : 32;
         int texgen = (g->geom & 0x40000) != 0;
         // lit: the light's colour tints the texture; unlit: the vertex colour does (taken from the first vertex)
-        const uint8_t *tint = lit ? g->diffuse : texgen ? white : vs[0]->c;
+        const uint8_t *tint = !g->shadeUsed ? white : lit ? shade : texgen ? white : vs[0]->c;   // a decal ignores the shade
+        s_texGain = texgen ? 260 : 100;
         rc = atlas_texture(g->loaded, g->tile[t].fmt, g->tile[t].siz, w, h, tint, g->opaque);
+        s_texGain = 100;
         if (!rc) return;
         for (int i = 0; i < 3; i++) {
             if (texgen) {
@@ -268,7 +308,7 @@ static void emit_tri(GfxState *g, int a, int b, int c)
                 break; }
         }
     } else if (lit) {
-        rc = atlas_color(g->diffuse[0], g->diffuse[1], g->diffuse[2], 255);
+        rc = atlas_color(shade[0], shade[1], shade[2], 255);
         if (!rc) return;
     } else {
         // unlit and untextured: the vertex colour (the first vertex's, for the whole triangle)
@@ -277,10 +317,65 @@ static void emit_tri(GfxState *g, int a, int b, int c)
     }
     (void)ids;
     if (lit) g->piece->litTris++; else g->piece->unlitTris++;
-    for (int i = 0; i < 3; i++) piece_add_vertex(g, vs[i], rc, st[i][0], st[i][1], lit, &idx[i]);
-    ObjPiece *pc = g->piece;
-    pc->idx = realloc(pc->idx, sizeof(uint16_t) * (pc->ni + 3));
-    pc->idx[pc->ni++] = (uint16_t)idx[0]; pc->idx[pc->ni++] = (uint16_t)idx[1]; pc->idx[pc->ni++] = (uint16_t)idx[2];
+
+    // A clamped texture is clamped per pixel on the N64. Here it is per vertex, which smears any triangle that crosses the
+    // texture's edge, so those are cut along the edges first: each piece then lies wholly inside, or wholly in one clamped
+    // zone, where clamping its vertices is exact.
+    int cw = 0, ch = 0, clampS = 0, clampT = 0;
+    if (textured && !(g->geom & 0x40000)) {
+        int t = 0;
+        cw = g->tile[t].w > 0 ? g->tile[t].w : g->tile[t].maskS ? 1 << g->tile[t].maskS : 32;
+        ch = g->tile[t].h > 0 ? g->tile[t].h : g->tile[t].maskT ? 1 << g->tile[t].maskT : 32;
+        clampS = (g->tile[t].cms & 2) != 0; clampT = (g->tile[t].cmt & 2) != 0;
+    }
+    int outside = 0;
+    for (int i = 0; i < 3; i++)
+        if ((clampS && (st[i][0] < -0.01f || st[i][0] > cw + 0.01f)) || (clampT && (st[i][1] < -0.01f || st[i][1] > ch + 0.01f))) outside = 1;
+    if (!outside) {
+        for (int i = 0; i < 3; i++) piece_add_vertex(g, vs[i], rc, st[i][0], st[i][1], lit, &idx[i]);
+        ObjPiece *pc = g->piece;
+        pc->idx = realloc(pc->idx, sizeof(uint16_t) * (pc->ni + 3));
+        pc->idx[pc->ni++] = (uint16_t)idx[0]; pc->idx[pc->ni++] = (uint16_t)idx[1]; pc->idx[pc->ni++] = (uint16_t)idx[2];
+        return;
+    }
+    enum { MAXP = 48, MAXV = 12 };
+    static CV polys[2][MAXP][MAXV];
+    static int counts[2][MAXP];
+    int cur = 0, np = 1;
+    for (int i = 0; i < 3; i++) { polys[0][0][i].p[0] = vs[i]->p[0]; polys[0][0][i].p[1] = vs[i]->p[1]; polys[0][0][i].p[2] = vs[i]->p[2]; polys[0][0][i].s = st[i][0]; polys[0][0][i].t = st[i][1]; polys[0][0][i].src = i; }
+    counts[0][0] = 3;
+    for (int axis = 0; axis < 2; axis++) {
+        if (!(axis == 0 ? clampS : clampT)) continue;
+        for (int l = 0; l < 2; l++) {
+            float lim = l == 0 ? 0.0f : (float)(axis == 0 ? cw : ch);
+            int nn = 0, nxt = 1 - cur;
+            for (int k = 0; k < np; k++) {
+                CV lo[MAXV], hi[MAXV];
+                int nlo, nhi;
+                split_poly(polys[cur][k], counts[cur][k], axis, lim, lo, &nlo, hi, &nhi);
+                if (nlo >= 3 && nn < MAXP) { memcpy(polys[nxt][nn], lo, sizeof(CV) * nlo); counts[nxt][nn++] = nlo; }
+                if (nhi >= 3 && nn < MAXP) { memcpy(polys[nxt][nn], hi, sizeof(CV) * nhi); counts[nxt][nn++] = nhi; }
+            }
+            cur = nxt; np = nn;
+        }
+    }
+    for (int k = 0; k < np; k++) {
+        int n = counts[cur][k], ix[MAXV];
+        for (int i = 0; i < n; i++) {
+            CV *cv = &polys[cur][k][i];
+            SVtx tmp = *vs[cv->src];
+            tmp.p[0] = (int16_t)floorf(cv->p[0] + 0.5f); tmp.p[1] = (int16_t)floorf(cv->p[1] + 0.5f); tmp.p[2] = (int16_t)floorf(cv->p[2] + 0.5f);
+            float s2 = cv->s, t2 = cv->t;
+            if (clampS) s2 = s2 < 0 ? 0 : s2 > cw ? (float)cw : s2;
+            if (clampT) t2 = t2 < 0 ? 0 : t2 > ch ? (float)ch : t2;
+            piece_add_vertex(g, &tmp, rc, s2, t2, lit, &ix[i]);
+        }
+        ObjPiece *pc = g->piece;
+        for (int i = 1; i + 1 < n; i++) {
+            pc->idx = realloc(pc->idx, sizeof(uint16_t) * (pc->ni + 3));
+            pc->idx[pc->ni++] = (uint16_t)ix[0]; pc->idx[pc->ni++] = (uint16_t)ix[i]; pc->idx[pc->ni++] = (uint16_t)ix[i + 1];
+        }
+    }
 }
 
 static void run_dl(uint32_t addr, GfxState *g, int depth)
@@ -316,6 +411,7 @@ static void run_dl(uint32_t addr, GfxState *g, int depth)
                 const uint8_t *l = segp(w1, 16);
                 if (!l) return;
                 memcpy(which == 0x86 ? g->diffuse : g->ambient, l, 3);
+                if (which == 0x86) memcpy(g->lightDir, l + 8, 3);
             }
             break;
         }
@@ -324,6 +420,11 @@ static void run_dl(uint32_t addr, GfxState *g, int depth)
         case 0xBB:     // G_TEXTURE
             g->texOn = (w0 & 0xFF) != 0; g->scaleS = w1 >> 16; g->scaleT = w1 & 0xFFFF;
             break;
+        case 0xFC: {   // G_SETCOMBINE, cycle 1's colour inputs (a - b) * c + d: does SHADE (4) take part?
+            int a0 = (w0 >> 20) & 15, c0 = (w0 >> 15) & 31, b0 = (w1 >> 28) & 15, d0 = (w1 >> 15) & 7;
+            g->shadeUsed = a0 == 4 || b0 == 4 || c0 == 4 || d0 == 4;
+            break;
+        }
         case 0xFD:     // G_SETTIMG
             g->timg = w1; g->timgFmt = (w0 >> 21) & 7; g->timgSiz = (w0 >> 19) & 3;
             break;
@@ -365,7 +466,7 @@ static int piece_for(uint32_t dl, int alpha, int opaque)
     GfxState g;
     memset(&g, 0, sizeof(g));
     g.piece = pc; g.opaque = opaque; g.root = dl;
-    g.geom = 0x1 | 0x4 | 0x200 | 0x2000 | 0x20000;   // what SM64 sets before drawing an object: z-buffer, shade, smooth, cull back, lighting
+    g.shadeUsed = 1; g.geom = 0x1 | 0x4 | 0x200 | 0x2000 | 0x20000;   // what SM64 sets before drawing an object: z-buffer, shade, smooth, cull back, lighting
     g.diffuse[0] = g.diffuse[1] = g.diffuse[2] = 255;
     run_dl(dl, &g, 0);
     s_pieceKeys[s_nPieces].dl = dl; s_pieceKeys[s_nPieces].alpha = alpha; s_pieceKeys[s_nPieces].piece = s_nPieces;
@@ -598,7 +699,8 @@ static void bng_part(Mat4 m, int piece, int billboard, Eval *e)
     else if (Rb[0][0] > Rb[1][1] && Rb[0][0] > Rb[2][2]) { float s = sqrtf(1 + Rb[0][0] - Rb[1][1] - Rb[2][2]) * 2; w = (Rb[2][1] - Rb[1][2]) / s; x = 0.25f * s; y = (Rb[0][1] + Rb[1][0]) / s; z = (Rb[0][2] + Rb[2][0]) / s; }
     else if (Rb[1][1] > Rb[2][2]) { float s = sqrtf(1 + Rb[1][1] - Rb[0][0] - Rb[2][2]) * 2; w = (Rb[0][2] - Rb[2][0]) / s; x = (Rb[0][1] + Rb[1][0]) / s; y = 0.25f * s; z = (Rb[1][2] + Rb[2][1]) / s; }
     else { float s = sqrtf(1 + Rb[2][2] - Rb[0][0] - Rb[1][1]) * 2; w = (Rb[1][0] - Rb[0][1]) / s; x = (Rb[0][2] + Rb[2][0]) / s; y = (Rb[1][2] + Rb[2][1]) / s; z = 0.25f * s; }
-    p->quat[0] = x; p->quat[1] = y; p->quat[2] = z; p->quat[3] = w;
+    // BeamNG's quaternions are the conjugate of the usual ones (quatFromDir(+x) * (0,1,0) = +x has z = +0.707)
+    p->quat[0] = -x; p->quat[1] = -y; p->quat[2] = -z; p->quat[3] = w;
     p->pos[0] = m[3][0] * SM64_SCALE; p->pos[1] = -m[3][2] * SM64_SCALE; p->pos[2] = m[3][1] * SM64_SCALE;
     p->scale = sc;
 }
@@ -679,7 +781,17 @@ static void eval_node(Eval *e, int i, Mat4 parent)
         int16_t z[3] = { 0, 0, 0 };
         mtxf_rotate_xyz_and_translate(m, t, z);
         mtxf_mul(m, m, parent);
-        // children are drawn facing the camera; the pose is marked and the game turns it
+        // mtxf_billboard: the sprite sits where the node is, faces the camera, and is scaled by the OBJECT's scale only: the
+        // geo layout's own scale nodes (a goomba's 0.25, a bob-omb's 0.375) don't touch it. The game turns it to the camera.
+        {
+            float sc = (e->pose->scale[0] + e->pose->scale[1] + e->pose->scale[2]) / 3.0f;
+            for (int r = 0; r < 3; r++) for (int c2 = 0; c2 < 4; c2++) m[r][c2] = (r == c2) ? sc : 0;
+            m[3][0] = 0; m[3][1] = 0; m[3][2] = 0;
+            // position: the translation through the parent
+            float pos[3];
+            for (int k = 0; k < 3; k++) pos[k] = t[0] * parent[0][k] + t[1] * parent[1][k] + t[2] * parent[2][k] + parent[3][k];
+            m[3][0] = pos[0]; m[3][1] = pos[1]; m[3][2] = pos[2];
+        }
         for (int c = n->child; c >= 0; c = e->tree->n[c].next) {
             const GNode *ch = &e->tree->n[c];
             if (ch->type == N_DL) { int pc = piece_for(ch->dl, ch->layer >= 4, ch->layer < 4); if (pc >= 0) bng_part(m, pc, 1, e); }
@@ -800,6 +912,7 @@ int main(int argc, char **argv)
     fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
     uint8_t *rom = malloc(n); fread(rom, 1, n, f); fclose(f);
     if (!objrom_load(rom, n, NULL) || !objrom_write_atlas(argv[2])) { printf("FAILED: %s\n", objrom_error()); return 1; }
+    if (argc > 3) { int id = atoi(argv[3]); for (int k = 0; k < s_pieces[id].nv; k++) printf("v%d p(%d,%d,%d) uv(%.1f,%.1f)\n", k, s_pieces[id].v[k].p[0], s_pieces[id].v[k].p[1], s_pieces[id].v[k].p[2], s_pieces[id].v[k].uv[0] / 65535.0 * ATLAS_W, s_pieces[id].v[k].uv[1] / 65535.0 * s_atlasH); }
     printf("pieces %d, atlas rects %d, out-of-range-uv triangles %d\n", s_nPieces, s_nRects, s_oorTris);
     for (int i = 0; i < s_nPieces; i++) printf("piece %2d: %3d verts %3d idx lit %d unlit %d%s\n", i, s_pieces[i].nv, s_pieces[i].ni, s_pieces[i].litTris, s_pieces[i].unlitTris, s_pieces[i].alpha ? " (alpha)" : "");
     for (int m = 0; m < OM_COUNT; m++) {
@@ -807,6 +920,8 @@ int main(int argc, char **argv)
         ObjPart parts[32];
         int np = objrom_pose(m, &pose, parts, 32);
         printf("model %d: %d parts:", m, np);
+        for (int i = 0; i < np; i++) { const ObjPiece *pc = &s_pieces[parts[i].piece]; int mn[3] = {32767,32767,32767}, mx[3] = {-32768,-32768,-32768}; for (int k = 0; k < pc->nv; k++) for (int a = 0; a < 3; a++) { if (pc->v[k].p[a] < mn[a]) mn[a] = pc->v[k].p[a]; if (pc->v[k].p[a] > mx[a]) mx[a] = pc->v[k].p[a]; } printf("\n   piece %d nv %d bbox (%d..%d, %d..%d, %d..%d)", parts[i].piece, pc->nv, mn[0], mx[0], mn[1], mx[1], mn[2], mx[2]); }
+        printf("\n  ");
         for (int i = 0; i < np; i++) printf(" %d@(%.2f,%.2f,%.2f)x%.2f%s", parts[i].piece, parts[i].pos[0], parts[i].pos[1], parts[i].pos[2], parts[i].scale, parts[i].billboard ? "B" : "");
         printf("\n");
     }

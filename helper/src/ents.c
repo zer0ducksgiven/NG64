@@ -1932,6 +1932,24 @@ static void spawn_enemy(void)
     }
 }
 
+// ---- tests: a model on show -----------------------------------------------------------------------------------------------------------------
+void ents_debug_show(int model, const float *posSm, int yaw, int animState, int animIdx, int frame)
+{
+    if (model == 255) { for (int i = 0; i < MAX_OBJ; i++) if (s_obj[i].used && s_obj[i].bhv == B_NONE) s_obj[i].used = 0; return; }
+    if (model < 0 || model >= OM_COUNT) return;
+    Obj *o = obj_alloc(B_NONE, ENT_EXPLOSION + 5, model, L_LEVEL);
+    if (!o) return;
+    memcpy(o->pos, posSm, 12);
+    o->faceYaw = (s16)yaw; o->animState = animState;
+    static const u32 tables[OM_COUNT] = { [OM_GOOMBA] = 0x0801DA4C, [OM_BOBOMB] = 0x0802396C, [OM_KOOPA] = 0x06011364, [OM_KOOPA_NOSHELL] = 0x06011364 };
+    o->animTable = tables[model];
+    if (animIdx != 255 && o->animTable) {
+        u32 a = objrom_anim_from_table(o->animTable, animIdx);
+        o->curAnim = a; o->animFrame = frame;
+    }
+    o->billboard = (model <= OM_COIN_BLUE || model == OM_EXPLOSION);
+}
+
 // ---- a car hits an enemy -------------------------------------------------------------------------------------------------------------------------------
 void ents_car_hit(int id, int kind, int haveDir, float dirX, float dirZ)
 {
@@ -2015,6 +2033,7 @@ void ents_tick(uint32_t tick, int marioId, const struct SM64MarioState *st)
         if (!o->used) continue;
         float dist2d = sqrtf(sqr(o->pos[0] - M.pos[0]) + sqr(o->pos[2] - M.pos[2]));
         if (dist2d > 100.0f / S && !o->ridden) { o->used = 0; continue; }
+        if (o->bhv == B_NONE) continue;
         update_object(o);
     }
 }

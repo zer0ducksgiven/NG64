@@ -50,6 +50,8 @@ int ents_pack(uint8_t *out, size_t cap);
 void ents_car_kill(int id, int kind);
 // the same with the direction the car was going (SM64 x, z, any length)
 void ents_car_hit(int id, int kind, int haveDir, float dirX, float dirZ);
+// tests: a static object showing a model (OM_*) in a given pose; model 255 clears them all
+void ents_debug_show(int model, const float *posSm, int yaw, int animState, int animIdx, int frame);
 int ents_star_active(void);
 void ents_clear(void);
 int ents_count(int enemies);

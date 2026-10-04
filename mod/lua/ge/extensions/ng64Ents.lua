@@ -55,6 +55,7 @@ local function makeMaterial(name, flat)
   -- BeamNG's light is dimmer than SM64's flat white: brighten the textures (the unlit ones, coins and sprites, most)
   local b = flat and "1.7 1.7 1.7 1" or "1.0 1.0 1.0 1"
   mat:setField("diffuseColor", 0, b)
+  mat:setField("specular", 0, "0 0 0 1")      -- SM64 has no reflections: they only tint it with the sky
   mat:setField("alphaTest", 0, "1")
   mat:setField("alphaRef", 0, "127")
   mat.canSave = false
@@ -409,7 +410,7 @@ function M.update(dt, marioPos)
               -- a billboard faces the camera (yaw only)
               local dx, dy = camPos.x - p.cp[1], camPos.y - p.cp[2]
               local th = math.atan2(dx, -dy)
-              q = { 0, 0, math.sin(th / 2), math.cos(th / 2) }
+              q = { 0, 0, -math.sin(th / 2), math.cos(th / 2) }
             end
             slot.obj:setPosRot(p.cp[1], p.cp[2], p.cp[3], q[1], q[2], q[3], q[4])
             if math.abs(p.cs - (slot.scale or 1)) > 1e-4 then
@@ -440,9 +441,19 @@ function M.update(dt, marioPos)
   end
 end
 
+function M.dbg()
+  local out = {}
+  for id, e in pairs(active) do
+    for k, p in ipairs(e.parts) do
+      out[#out + 1] = string.format("%d/%d piece %s flags %s pos %.2f %.2f %.2f scale %.3f slot %s hidden %s lit %s", id, k, tostring(p.piece), tostring(p.flags), p.cp and p.cp[1] or 0, p.cp and p.cp[2] or 0, p.cp and p.cp[3] or 0, p.cs or 0, tostring(p.slot ~= nil), tostring(p.slot and p.slot.hidden), tostring(pieces[p.piece] and pieces[p.piece].alpha))
+    end
+  end
+  return out
+end
+
 function M.list()
   local out = {}
-  for id, e in pairs(active) do out[#out + 1] = { id = id, type = e.type, state = e.state, x = e.tx, y = e.ty, z = e.tz, parts = #e.parts } end
+  for id, e in pairs(active) do out[#out + 1] = { id = id, type = e.type, state = e.state, x = e.tx, y = e.ty, z = e.tz, parts = #e.parts, flags = e.parts[1] and e.parts[1].flags, piece = e.parts[1] and e.parts[1].piece } end
   return out
 end
 

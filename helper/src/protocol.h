@@ -37,6 +37,7 @@
 #define MSG_FIRE      'k'  // u8 count; count * {f32 x, y, z, radius} (bng): flames near Mario (burning vehicle nodes), refreshed ~10 Hz; none = no fire
 #define MSG_ENTITIES  'n'  // u16 count; count * {u16 id; u8 type; u8 state; u8 nparts; u8 pad; f32 x, y, z (bng); nparts * {u16 piece; u8 billboard; u8 pad; f32 pos[3]; i16 quat[4]; f32 scale}}: pickups and enemies, each posed as rigid pieces of its ROM model
 #define MSG_OBJ_ATLAS 'z'  // str atlasPath (game-virtual path): the PNG of the textures the object models use
+#define MSG_OBJ_SHOW  'u'  // tests: u8 model (255 = clear); f32 x, y, z (bng); i16 yaw (s16 angle); u8 animState; u8 animIdx (255 none); i16 frame - a static showcase object
 #define MSG_OBJ_REQ   'y'  // u16 piece: the client has no geometry for this object piece
 #define MSG_OBJ_PIECE 'x'  // u16 piece; u8 alpha; u8 pad; u16 nv, ni; nv * ObjVert (14 bytes: s16 p[3] SM64 units; s8 n[3]; pad; u16 uv[2]); ni * u16
 #define MSG_ENT_EVENT 'v'  // u8 kind; u16 id; f32 a, b, c, d: something happened to / with them (coin, star, cap, explosion...); see ents.h
