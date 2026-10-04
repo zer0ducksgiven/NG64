@@ -232,7 +232,7 @@ local THROW_TIME = 0.05
 -- body that dents and collides: when it can't get where it should be, or touches another vehicle, the spin is over.
 local SPIN_K = 450            -- 1/s^2
 local SPIN_C = 34             -- 1/s
-local SPIN_GRIP = 0.95        -- from his axis to the end of the car he holds
+local SPIN_GRIP = 0.55        -- from his axis to the end of the car he holds: just past his gloves, which swing out ~0.3 m
 local SPIN_HAND_Z = 1.0       -- his hands above his feet
 local SPIN_TILT = math.rad(10)   -- the far end lifts this much at full spin (low enough to take other cars with it)
 local SPIN_OMEGA_MAX = 11.8   -- rad/s, SM64's fastest spin
@@ -361,6 +361,7 @@ spinUpdate = function(dt)
   if hit and lead then
     local speed = math.sqrt(leadSpeed2)
     local dx, dy, dz = lead[4] / math.max(speed, 1e-3), lead[5] / math.max(speed, 1e-3), lead[6] / math.max(speed, 1e-3)
+    M.lastSpin = string.format("spin ended (%s): err %.2f m, worst %.2f m, t %.2f s, other vehicle %s", why, err, worst, s.t, tostring(otherId))   -- for tests
     log("I", "ng64Hit", string.format("spin ended (%s): err %.2f m, worst %.2f m, t %.2f s, other vehicle %s", why, err, worst, s.t, tostring(otherId)))
     spinDrop()
     obj:queueGameEngineLua(string.format("ng64.onSpinHit(%d, %d, %f,%f,%f, %f,%f,%f, %f)", obj:getId(), otherId or 0,

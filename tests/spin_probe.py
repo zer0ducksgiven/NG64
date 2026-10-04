@@ -41,7 +41,7 @@ if wall:
     lua("if _ng64wall then _ng64wall:delete() end _ng64wall = core_vehicles.spawnNewVehicle('pickup', {pos=vec3(%f,%f,%f), rot=quatFromDir(vec3(0,1,0), vec3(0,0,1)), autoEnterVehicle=false}) return 1" % (c0[0] + 4.5, c0[1] - 2.2, bz + 0.5))
     time.sleep(4)
     w0 = car_state("_ng64wall")
-HOLD = 6.0   # seconds of Y held
+HOLD = 9.0   # seconds of Y held
 lua("ng64.scriptInput(0,0,false,false,false,%d,0,1,false,false,0,true) return 1" % int(HOLD * 30))
 t0 = time.time()
 samples = []
@@ -53,8 +53,9 @@ while time.time() - t0 < HOLD + 0.5:
     r = math.hypot(cs[0] - mp[0], cs[1] - mp[1])
     sp = math.hypot(cs[9], cs[10])
     samples.append((time.time() - t0, s.get("action", 0), r, sp, cs[2] - mp[2], cs[5]))
-    if shots and 3.0 < time.time() - t0 < 3.4 and "spin" not in done:
-        done.add("spin"); shotmod.shot("F:/NG64/tests/.tmp/spin_swing.jpg", 0.5)
+    for when, name in ((0.7, "grab"), (1.9, "start"), (4.5, "swing")):
+        if shots and time.time() - t0 > when and name not in done:
+            done.add(name); shotmod.shot("F:/NG64/tests/.tmp/spin_%s.jpg" % name, 0.5)
     time.sleep(0.25)
 print("t     action    radius  speed  height-above-feet  nose-z")
 for t, a, r, sp, h, nz in samples[::2]:
@@ -77,4 +78,8 @@ for l in log[-60:]:
 if wall:
     w1 = car_state("_ng64wall")
     print("wall car moved %.1f m" % math.hypot(w1[0] - w0[0], w1[1] - w0[1]))
+# why the spin ended, from the car's own Lua (the game log is buffered for a long time)
+lua("_ng64last = nil _ng64sp:queueLuaCommand([[obj:queueGameEngineLua('_ng64last = ' .. string.format('%q', tostring(ng64Hit and ng64Hit.lastSpin)))]]) return 1")
+time.sleep(1)
+print("car says:", lua("return tostring(_ng64last)"))
 lua("if _ng64sp then _ng64sp:delete() _ng64sp = nil end if _ng64wall then _ng64wall:delete() _ng64wall = nil end return 1")

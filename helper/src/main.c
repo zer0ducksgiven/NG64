@@ -1128,6 +1128,10 @@ static struct {
     int spin, spinAuto, relReq;   // Bowser-style spin; the keyboard winds it up by itself; Y was let go
     float prevFace, omega;        // his facing last tick, and the spin rate (rad/s) worked out from it
     float carOff;                 // the car points out from him this far round (bng yaw) from the way he faces
+    float carOff0;                // ...where the car was when he grabbed it
+    int swingTicks;               // ticks since he started swinging: the car comes round to his hands over a few
+    float prevPhi;                // where the car pointed last tick (bng yaw)
+    int havePhi;
     uint32_t breakVeh;            // the mod says this car hit something
 } s_carry;
 // Y pressed on a car and still down: a tap is the ordinary lift, a hold is the spin grab
@@ -1282,6 +1286,7 @@ static Vehicle *carry_target(const Mario *m, int *pieceOut)
     return best;
 }
 // ---- lifting and spinning --------------------------------------------------------------------------------------------
+static float angdiff(float a, float b);
 static void start_lift(Mario *m, Vehicle *v, int piece)
 {
     const struct SM64MarioState *st = &m->state;
@@ -1314,7 +1319,7 @@ static void start_spin(Mario *m, Vehicle *v, int keyboard)
     float posB[3];
     sm2bng(st->position, posB);
     // the car swings out from where it already is, so it never has to sweep through him to get into place
-    s_carry.carOff = atan2f(v->orgB[1] - posB[1], v->orgB[0] - posB[0]) - (st->faceAngle - PI / 2);
+    s_carry.carOff0 = s_carry.carOff = atan2f(v->orgB[1] - posB[1], v->orgB[0] - posB[0]) - (st->faceAngle - PI / 2);
     send_carry(4, v, 0, 1, posB, 0, NULL);
     logf_("grabbed vehicle %u to spin (%s)", v->vehId, keyboard ? "keyboard: it winds up by itself" : "circle the stick");
 }
@@ -1333,13 +1338,20 @@ static void spin_update(Mario *m, Vehicle *v, int yNow)
     const struct SM64MarioState *st = &m->state;
     uint32_t act = st->action;
     int holding = act == ACT_HOLDING_BOWSER, grabbing = act == ACT_PICKING_UP_BOWSER, releasing = act == ACT_RELEASING_BOWSER;
+    // SM64's swing pose has his gloves behind the way he faces (half a turn round: measured), while the grab reaches
+    // towards the car. So the car starts where it is and, as the swing begins, comes round to his hands.
+    if (holding && s_carry.swingTicks < 24) s_carry.swingTicks++;
+    {
+        float d = fmodf(PI - s_carry.carOff0 + 4 * PI, 2 * PI);   // the way round, 0..2 pi
+        float t = s_carry.swingTicks / 24.0f;
+        s_carry.carOff = s_carry.carOff0 + d * (t * t * (3 - 2 * t));
+    }
     float phi = (st->faceAngle - PI / 2) + s_carry.carOff;   // sm64 yaw -> bng yaw, then round to where the car is
     float posB[3];
     sm2bng(st->position, posB);
     // his spin rate in rad/s: SM64 angle units per frame (0x10000 = a turn), 30 frames a second
     float omega = sm64_mario_spin_rate(m->id) * (2 * PI / 65536.0f) * 30.0f;
     if (holding || grabbing) s_carry.omega = omega;
-
     if (s_carry.breakVeh == v->vehId) {
         // the car hit something: he lets go, it drops (its own Lua already stopped holding it)
         SM64_AUDIO_SAFE(sm64_mario_release_bowser(m->id, 1));
@@ -1377,7 +1389,11 @@ static void spin_update(Mario *m, Vehicle *v, int yNow)
         s_carry.relReq = 1;
         s_injectB = 1;
     }
-    float velB[3] = { omega, 0, 0 };
+    // the rate the car actually turns round him: his spin plus the swing round to his hands, for the car's velocity
+    float phiRate = s_carry.havePhi ? angdiff(phi, s_carry.prevPhi) * 30.0f : omega;
+    s_carry.prevPhi = phi;
+    s_carry.havePhi = 1;
+    float velB[3] = { phiRate, 0, 0 };
     send_carry(5, v, 0, 1, posB, phi, velB);
 }
 
@@ -1568,9 +1584,13 @@ static void update_camera(const Mario *m, const Pad *pad, float dt)
     s_camTarget[0] = st->position[0];
     s_camTarget[1] = st->position[1] + 100;
     s_camTarget[2] = st->position[2];
-    s_camPos[0] = s_camTarget[0] + sinf(s_camYaw) * cosf(s_camPitch) * s_camDist;
-    s_camPos[1] = s_camTarget[1] + sinf(s_camPitch) * s_camDist;
-    s_camPos[2] = s_camTarget[2] + cosf(s_camYaw) * cosf(s_camPitch) * s_camDist;
+    // while he spins a car the camera backs off, so the swinging car doesn't sweep through it
+    static float spinPull;
+    spinPull += (((s_carry.active && s_carry.spin) ? 1.0f : 0.0f) - spinPull) * fminf(1.0f, 3.0f * dt);
+    float dist = s_camDist + spinPull * 450.0f;
+    s_camPos[0] = s_camTarget[0] + sinf(s_camYaw) * cosf(s_camPitch) * dist;
+    s_camPos[1] = s_camTarget[1] + sinf(s_camPitch) * dist;
+    s_camPos[2] = s_camTarget[2] + cosf(s_camYaw) * cosf(s_camPitch) * dist;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
