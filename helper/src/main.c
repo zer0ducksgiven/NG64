@@ -32,6 +32,12 @@ const char *ng64_mario_rom_error(void);
 int ng64_hud_write(const char *userPath);
 static int s_hudOk;
 void ng64_audio_stop(void);
+void ng64_audio_stats(long *underruns, long *maxGapMs, long *level);
+void ng64_sm64_lock(void);
+void ng64_sm64_unlock(void);
+// libsm64's audio runs on its own thread (audio.c) and shares state with the calls that start sounds and music: those
+// run under this lock, one at a time with the audio tick
+#define SM64_AUDIO_SAFE(call) do { ng64_sm64_lock(); call; ng64_sm64_unlock(); } while (0)
 
 extern uint32_t s_tick;   // simulation tick, defined with the frame sender
 
@@ -1113,7 +1119,6 @@ static void send_toast(const char *msg)
     send_log(buf);
 }
 
-void ng64_audio_level(double rms) { logf_("audio level %.0f (rms)", rms); }
 
 // Back (M) toggles the music, on release; held with RB / LB (or ] / [ on the keyboard) it changes song instead.
 // While Back is held the bumpers don't zoom the camera.
@@ -1146,11 +1151,14 @@ static void music_update(Pad *pad)
     s_scriptMusic = 0;
     int want = s_audioOk && s_musicOn && s_inputEnabled && mario_find(0) != NULL;
     if (want && !s_musicPlaying) {
+        ng64_sm64_lock();
         sm64_ng64_music_play(s_songs[s_song].seq);
+        uint32_t ms = sm64_ng64_music_status();
+        ng64_sm64_unlock();
         s_musicPlaying = 1;
-        logf_("music playing (sequence 0x%02x)", s_songs[s_song].seq);
+        logf_("music playing (sequence 0x%02x; player has 0x%02x, queue %u)", s_songs[s_song].seq, ms & 0xFF, ms >> 16);
     } else if (!want && s_musicPlaying) {
-        sm64_ng64_music_stop(30);   // one-second fade
+        SM64_AUDIO_SAFE(sm64_ng64_music_stop(30));   // one-second fade
         s_musicPlaying = 0;
         logf_("music stopped");
     }
@@ -1247,7 +1255,7 @@ static void carry_update(Mario *m, const Pad *pad)
         }
         // the main body lifts overhead (heavy); a piece that came off lifts like a crate
         int heavy = piece == 0;
-        sm64_mario_pick_up(m->id, heavy != 0);
+        SM64_AUDIO_SAFE(sm64_mario_pick_up(m->id, heavy != 0));
         s_carry.active = 1; s_carry.vehId = v->vehId; s_carry.piece = piece; s_carry.heavy = heavy;
         vehicle_release(v);            // no collision while it's in his hands
         v->held = 1;
@@ -1310,7 +1318,7 @@ static void carry_update(Mario *m, const Pad *pad)
         s_prevZ = s_effZ;
         if (s_carry.heavy && zEdge && st->action == 0x08000208 /* ACT_HOLD_HEAVY_IDLE */) {
             sm64_mario_drop_held(m->id);
-            sm64_set_mario_action(m->id, ACT_IDLE_NG64);
+            SM64_AUDIO_SAFE(sm64_set_mario_action(m->id, ACT_IDLE_NG64));
         }
         // where the piece's underside should rest: on his gloves, wherever this frame's animation has put them (the
         // gloves are the only pure-white part of the model) - so it sits in his hands and bobs with them, the way
@@ -1708,7 +1716,7 @@ static void handle_packet(const uint8_t *p, int len)
             if (len >= 13 && p[12]) {
                 // vehicle reset: back on his feet at full health, like a reset repairs a car
                 sm64_set_mario_health(m->id, 0x880);
-                sm64_set_mario_action(m->id, ACT_FREEFALL);
+                SM64_AUDIO_SAFE(sm64_set_mario_action(m->id, ACT_FREEFALL));
                 logf_("mario reset to %.2f %.2f %.2f", ((const float *)p)[0], ((const float *)p)[1], ((const float *)p)[2]);
             }
         }
@@ -1721,7 +1729,7 @@ static void handle_packet(const uint8_t *p, int len)
         if (m && len >= 14) {
             float sp[3];
             bng2sm((const float *)p, sp);
-            sm64_mario_take_damage(m->id, p[12], p[13] ? 0x00000008 /* INT_SUBTYPE_BIG_KNOCKBACK */ : 0, sp[0], sp[1], sp[2]);
+            SM64_AUDIO_SAFE(sm64_mario_take_damage(m->id, p[12], p[13] ? 0x00000008 /* INT_SUBTYPE_BIG_KNOCKBACK */ : 0, sp[0], sp[1], sp[2]));
             if (len >= 26) {
                 // thrown clear of the car (SM64's own tumble-through-the-air knockback, as from an explosion):
                 // face the car and fly backwards along its direction of travel, faster the faster it was going
@@ -1734,7 +1742,7 @@ static void handle_packet(const uint8_t *p, int len)
                 float ax = hs > 1 ? -vs[0] : sp[0] - mp[0], az = hs > 1 ? -vs[2] : sp[2] - mp[2];   // toward the car
                 float face = atan2f(ax, az);
                 float speed = fminf(70.0f, fmaxf(24.0f, hs * 1.1f));
-                sm64_set_mario_action(m->id, ACT_THROWN_BACKWARD);
+                SM64_AUDIO_SAFE(sm64_set_mario_action(m->id, ACT_THROWN_BACKWARD));
                 sm64_set_mario_faceangle(m->id, face);
                 sm64_set_mario_forward_velocity(m->id, -speed);
                 sm64_set_mario_velocity(m->id, -sinf(face) * speed, fminf(55.0f, fmaxf(28.0f, speed * 0.6f)), -cosf(face) * speed);
@@ -2039,13 +2047,13 @@ int main(int argc, char **argv)
                 sm64_set_mario_position(m->id, m->rPos[0], m->rPos[1], m->rPos[2]);
                 sm64_set_mario_faceangle(m->id, m->rFace);
                 sm64_set_mario_velocity(m->id, 0, 0, 0);
-                sm64_set_mario_action(m->id, m->rAction);
+                SM64_AUDIO_SAFE(sm64_set_mario_action(m->id, m->rAction));
                 sm64_set_mario_animation(m->id, m->rAnim);
                 sm64_set_mario_anim_frame(m->id, m->rFrame);
                 in.camLookZ = -1;
             }
             sm64_set_mario_water_level(m->id, water_level_at(m->state.position));
-            sm64_mario_tick(m->id, &in, &m->state, &m->geo);
+            SM64_AUDIO_SAFE(sm64_mario_tick(m->id, &in, &m->state, &m->geo));
             if (m->key == 0 && vehicle_push_out(m)) {
                 static DWORD lastPushLog;
                 if (GetTickCount() - lastPushLog > 1000) { lastPushLog = GetTickCount(); logf_("pushed mario out of a vehicle"); }
@@ -2083,6 +2091,12 @@ int main(int argc, char **argv)
             tickMsSum += ms; if (ms > tickMsMax) tickMsMax = ms;
             if (++tickN == 150) {
                 logf_("tick: %.2f ms avg, %.2f ms max (%d static surfaces)", tickMsSum / tickN, tickMsMax, s_terrainCount + s_meshCount + s_levelCount);
+                if (s_audioOk) {
+                    long underruns, gapMs, level;
+                    ng64_audio_stats(&underruns, &gapMs, &level);
+                    logf_("audio level %ld (rms)", level);
+                    logf_("audio: %ld underrun(s) so far, longest wait between audio loops %ld ms", underruns, gapMs);
+                }
                 tickMsSum = tickMsMax = 0; tickN = 0;
             }
         }

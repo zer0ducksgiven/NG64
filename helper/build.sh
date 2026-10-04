@@ -5,6 +5,9 @@
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export MSYSTEM=MINGW64
+# optional overrides, for A/B builds: AUDIO_C=path/to/audio.c OUT=path/to/helper.exe
+AUDIO_C="${AUDIO_C:-src/audio.c}"
+OUT="${OUT:-dist/ng64helper.exe}"
 /c/msys64/usr/bin/bash.exe -lc "
 set -e
 cd '$HERE/../libsm64-master'
@@ -20,8 +23,8 @@ rm -f src/decomp/mario/*.inc.c src/decomp/mario/*.inc.h build/src/decomp/mario/*
 make lib CC=gcc -j8 >/dev/null
 cd '$HERE' && mkdir -p dist
 gcc -O2 -Wall -Wno-unused-function -DGBI_FLOATS -DSM64_LIB_EXPORT -DVERSION_US -DNO_SEGMENTED_MEMORY \
-  -I../libsm64-master/src -I../libsm64-master/src/decomp/include -o dist/ng64helper.exe \
-  src/main.c src/png.c src/audio.c src/hud.c src/mario_rom_geo.c src/mario_rom_dl.c src/lifecycle.c src/rom_format.c \$(ls ../libsm64-master/build/src/*.o ../libsm64-master/build/src/decomp/*/*.o ../libsm64-master/build/src/decomp/*.o ../libsm64-master/build/src/decomp/*/*/*.o 2>/dev/null) \
+  -I../libsm64-master/src -I../libsm64-master/src/decomp/include -o $OUT \
+  src/main.c src/png.c $AUDIO_C src/hud.c src/mario_rom_geo.c src/mario_rom_dl.c src/lifecycle.c src/rom_format.c \$(ls ../libsm64-master/build/src/*.o ../libsm64-master/build/src/decomp/*/*.o ../libsm64-master/build/src/decomp/*.o ../libsm64-master/build/src/decomp/*/*/*.o 2>/dev/null) \
   -static -mwindows -lws2_32 -lwinmm -lm
 "
-echo built "$HERE/dist/ng64helper.exe"
+echo built "$HERE/$OUT"

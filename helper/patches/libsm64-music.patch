@@ -1,6 +1,6 @@
 --- a/src/libsm64.c
 +++ b/src/libsm64.c
-@@ -765,3 +765,20 @@
+@@ -771,3 +771,34 @@
      mario_drop_held_object( gMarioState );
      if( gMarioState->action == ACT_PICKING_UP ) set_mario_action( gMarioState, ACT_IDLE, 0 );
  }
@@ -10,26 +10,41 @@
 +// the level sequence player and stop it again (queue entry removed, player faded out).
 +#include "decomp/audio/external.h"
 +
++// SM64 keeps the level music in a 6-deep queue and play_music() silently refuses once it's full. Every song change
++// used to add an entry, so after six changes the player was stuck on one song until the music was muted. One song at
++// a time here: whatever was queued is dropped first.
++extern u8 sBackgroundMusicQueueSize;
++
 +SM64_LIB_FN void sm64_ng64_music_play(uint8_t seqId)
 +{
++    sBackgroundMusicQueueSize = 0;
 +    play_music( SEQ_PLAYER_LEVEL, SEQUENCE_ARGS( 4, seqId ), 0 );
 +}
 +
 +SM64_LIB_FN void sm64_ng64_music_stop(uint16_t fadeFrames)
 +{
-+    uint16_t cur = get_current_background_music();
-+    if( cur != 0xFFFF ) stop_background_music( cur );
++    sBackgroundMusicQueueSize = 0;
 +    seq_player_fade_out( SEQ_PLAYER_LEVEL, fadeFrames );
++}
++
++#include "decomp/audio/load.h"
++
++// what the level sequence player is doing, for logs and tests: sequence loaded (0xFF none) | enabled << 8 | queue size << 16
++SM64_LIB_FN uint32_t sm64_ng64_music_status(void)
++{
++    extern u8 sCurrentBackgroundMusicSeqId, sBackgroundMusicQueueSize;
++    return ( (uint32_t)sBackgroundMusicQueueSize << 16 ) | ( gSequencePlayers[SEQ_PLAYER_LEVEL].enabled ? 0x100u : 0u ) | sCurrentBackgroundMusicSeqId;
 +}
 --- a/src/libsm64.h
 +++ b/src/libsm64.h
-@@ -185,6 +185,10 @@
+@@ -185,6 +185,11 @@
  extern SM64_LIB_FN bool sm64_mario_is_holding(int32_t marioId);
  extern SM64_LIB_FN void sm64_mario_drop_held(int32_t marioId);
  
 +// NG64 additions: background music on the level sequence player
 +extern SM64_LIB_FN void sm64_ng64_music_play(uint8_t seqId);
 +extern SM64_LIB_FN void sm64_ng64_music_stop(uint16_t fadeFrames);
++extern SM64_LIB_FN uint32_t sm64_ng64_music_status(void);
 +
  extern SM64_LIB_FN uint32_t sm64_surface_object_create( const struct SM64SurfaceObject *surfaceObject );
  extern SM64_LIB_FN void sm64_surface_object_move( uint32_t objectId, const struct SM64ObjectTransform *transform );
