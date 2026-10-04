@@ -1072,6 +1072,14 @@ local function handlePacket(data)
     -- keepalive reply
   elseif t == "L" then
     local msg = string.sub(data, 2, -2)
+    local longToast = string.match(msg, "^toastl:(.*)")
+    if longToast then
+      -- a notice that stays up (a new version is out): with a close button, 20 s
+      guihooks.trigger("toastrMsg", { type = "info", title = "NG64 update", msg = longToast,
+        config = { closeButton = true, timeOut = 20000, extendedTimeOut = 5000 } })
+      lastToast = longToast
+      return
+    end
     local toast = string.match(msg, "^toast:(.*)")
     if toast then
       guihooks.trigger("toastrMsg", { type = "info", title = "NG64", msg = toast })

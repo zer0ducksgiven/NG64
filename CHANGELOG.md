@@ -2,6 +2,11 @@
 
 ## 0.1.4
 
+**Update notice**
+- When a newer NG64 has been published on GitHub, the game says so a few seconds after you start playing (the helper checks
+  GitHub's latest release when it starts, and every 12 hours). To turn it off, create an empty `no-update-check.txt` next to
+  `ng64helper.exe`.
+
 **Fire**
 - Mario catches fire from the flames of burning vehicles (a fuel leak that ignites, a wreck on fire), on the bodywork or low
   down near the ground. He plays SM64's burning pain animation, runs about in flames, and loses health as in SM64 (about

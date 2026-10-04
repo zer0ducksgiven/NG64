@@ -139,6 +139,13 @@ Buttons are matched by position, so the bottom button always jumps whichever con
   and the next respawn starts at 4 again. Nothing in BeamNG hands out coins or stars yet (maps and mods can).
 - **Reset (R)** puts Mario back on his feet at full health, where BeamNG's reset puts vehicles.
 
+## Updates
+
+The helper asks GitHub (api.github.com, a single request for this project's latest release) whether a newer NG64 has been
+published, when it starts and every 12 hours, and shows a notice in the game if there is one. Nothing is sent but that
+request. To turn it off, create an empty file called `no-update-check.txt` next to `ng64helper.exe`
+(`%LOCALAPPDATA%\NG64`), or start the helper with `--no-update-check`.
+
 ## Troubleshooting
 
 - **"The NG64 helper isn't running"**: start **NG64** from the Start menu (or `ng64helper.exe` by hand), or run

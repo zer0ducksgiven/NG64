@@ -17,6 +17,7 @@
 #include <string.h>
 #include "libsm64.h"
 #include "pad.h"
+#include "update.h"
 #include "protocol.h"
 
 int png_write_rgba(const char *path, const uint8_t *rgba, int w, int h);
@@ -1161,6 +1162,25 @@ static int s_song;
 static int s_audioOk, s_musicOn = 1, s_musicPlaying, s_prevMusic, s_scriptMusic, s_scriptSong;
 static int s_musicCombo, s_prevNext, s_prevPrev;
 
+// A newer release on GitHub (found by the update check in the background): once the game has said hello and settled, a
+// notice that stays up a while.
+static void update_notice(void)
+{
+    extern uint32_t s_tick;
+    static int shown;
+    static uint32_t since;
+    if (shown || !s_userPath[0] || !s_haveClient) return;
+    char tag[40], cur[40];
+    if (ng64_update_state(tag, sizeof(tag), cur, sizeof(cur)) != NG64_UPDATE_NEWER) return;
+    if (!since) since = s_tick;
+    if (s_tick - since < 150) return;   // ~5 s after the mod connected / the answer came
+    shown = 1;
+    char msg[200];
+    snprintf(msg, sizeof(msg), "toastl:NG64 %s is out (you have %s). Download it at github.com/zer0ducksgiven/NG64/releases", tag, cur);
+    send_log(msg);
+    logf_("update available: %s (running %s)", tag, cur);
+}
+
 static void send_toast(const char *msg)
 {
     char buf[128];
@@ -2115,7 +2135,7 @@ int main(int argc, char **argv)
     const char *romPath = NULL;
     int audio = 1, port = NG64_PORT, verbose = 0;
     char exeDir[MAX_PATH], exePath[MAX_PATH];
-    int watch = 0;
+    int watch = 0, noUpdateCheck = 0;
     const char *previewDir = NULL;   // --write-preview <user folder>: draw the vehicle selector picture and exit
     DWORD parentPid = 0;
     GetModuleFileNameA(NULL, exeDir, sizeof(exeDir));
@@ -2129,6 +2149,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--no-audio")) audio = 0;
         else if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ignore-focus")) s_ignoreFocus = 1;
+        else if (!strcmp(argv[i], "--no-update-check")) noUpdateCheck = 1;
         else if (!strcmp(argv[i], "--verbose")) verbose = 1;
         else if (!strcmp(argv[i], "--write-preview") && i + 1 < argc) previewDir = argv[++i];
         else if (!strcmp(argv[i], "--watch")) watch = 1;                  // standby: start a helper whenever BeamNG runs
@@ -2228,6 +2249,7 @@ int main(int argc, char **argv)
     s_hudOk = ng64_hud_extract(rom, romLen);
     if (!s_hudOk) logf_("HUD graphics not found in this ROM (not a US ROM?) - the HUD will use plain text");
     logf_("notification area icon: %s", ng64_tray_start() ? "shown" : "could not be added");
+    if (!noUpdateCheck) ng64_update_start(exeDir);
     {
         char ini[MAX_PATH];
         snprintf(ini, sizeof(ini), "%s\\controller.ini", exeDir);
@@ -2318,6 +2340,7 @@ int main(int argc, char **argv)
         read_pad(&pad);
         if (!s_inputEnabled) memset(&pad, 0, sizeof(pad));
         music_update(&pad);
+        update_notice();
         mesh_update();
         DWORD t = GetTickCount();
 

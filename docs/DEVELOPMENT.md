@@ -127,6 +127,10 @@ stop `ng64helper` before testing a fresh build.
   by the end nearer him, at his gloves (their reach along the car and height are measured from the white triangles of 
   the geometry every tick and sent in kind 5).
   `tests/spin_probe.py [--wall|--shots]`, `tests/terrain_spin_probe.py`.
+- Update check (`update.c`, WinHTTP, no extra libraries): a background thread GETs the latest release of the repo and compares
+  its tag with `NG64_VERSION` (generated from `VERSION` into `helper/src/version.h` by `build.sh`); a newer one is announced once
+  per run as a `toastl:` message (a long-lived toast in the mod). `NG64_UPDATE_TEST_VERSION=0.1.0` pretends to be an older
+  version; `tests/update_check_test.py`, `tests/update_test.c`.
 - Fire: each car reports its burning nodes (`ng64Hit.lua`, from BeamNG's `fire.hotNodes`, ~10 Hz) to `ng64.onFire`; the
   GE side sends the ones near Mario as flame spheres (`MSG_FIRE`, protocol 12); the helper's `check_fire` lights him up with
   `sm64_mario_burn` (`libsm64-burn.patch`: SM64's interact_flame - burning actions, health drain, water puts it out) when
