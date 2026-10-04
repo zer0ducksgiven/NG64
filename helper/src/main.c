@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "libsm64.h"
+#include "pad.h"
 #include "protocol.h"
 
 int png_write_rgba(const char *path, const uint8_t *rgba, int w, int h);
@@ -119,6 +120,7 @@ static char s_atlasGamePath[MAX_PATH];   // BeamNG virtual path
 static char s_userPath[MAX_PATH];
 static char s_exePath[MAX_PATH], s_romPathUsed[MAX_PATH];
 static void ensure_preview(const char *userPath);
+static void di_log(const char *msg) { logf_("%s", msg); }
 
 static int band_for_color(const float *c)
 {
@@ -1033,7 +1035,6 @@ static void check_attacks(Mario *m)
 typedef DWORD(WINAPI *XInputGetStateFn)(DWORD, XINPUT_STATE *);
 static XInputGetStateFn s_xinputGetState;
 
-typedef struct { float lx, ly, rx, ry; int a, b, z, zoomIn, zoomOut, y, music, songNext, songPrev; } Pad;
 
 static float deadzone(SHORT v, SHORT dz)
 {
@@ -1072,6 +1073,7 @@ static void read_pad(Pad *p)
             break;
         }
     }
+    ng64_dinput_read(p);   // PlayStation / Switch / generic pads, merged with whatever XInput gave
 #define KEY(k) ((GetAsyncKeyState(k) & 0x8000) != 0)
     if (KEY('W')) p->ly = 1;
     if (KEY('S')) p->ly = -1;
@@ -1989,6 +1991,11 @@ int main(int argc, char **argv)
     s_hudOk = ng64_hud_extract(rom, romLen);
     if (!s_hudOk) logf_("HUD graphics not found in this ROM (not a US ROM?) - the HUD will use plain text");
     logf_("notification area icon: %s", ng64_tray_start() ? "shown" : "could not be added");
+    {
+        char ini[MAX_PATH];
+        snprintf(ini, sizeof(ini), "%s\\controller.ini", exeDir);
+        ng64_dinput_init(di_log, ini);
+    }
 
     HMODULE xi = LoadLibraryA("xinput1_4.dll");
     if (!xi) xi = LoadLibraryA("xinput9_1_0.dll");
