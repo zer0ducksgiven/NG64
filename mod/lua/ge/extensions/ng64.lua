@@ -11,7 +11,7 @@ local world = require("ge/extensions/ng64World")
 local hud = require("ge/extensions/ng64Hud")
 
 local HELPER_HOST, HELPER_PORT = "127.0.0.1", 47064
-local PROTO_VERSION = 10
+local PROTO_VERSION = 11
 local STUB_MODEL = "ng64_mario"
 
 local GRID_N, GRID_SP = 49, 0.5         -- terrain sample grid around Mario (24 m square)
@@ -901,13 +901,43 @@ local function onCarry(c)
     local f = c.yaw
     veh:queueLuaCommand(string.format("if ng64Hit then ng64Hit.carryTarget(%f,%f,%f,%f) end",
       c.point[0], c.point[1], c.point[2], math.atan2(-math.cos(f), math.sin(f))))
+  elseif kind == 4 then
+    -- Bowser-style grab: he's about to spin it. point = where he stands (the car's vehicle side picks the end to hold)
+    carryingId = id
+    carryCount = carryCount + 1
+    hitGrace[id] = math.huge
+    veh:queueLuaCommand(string.format("if not ng64Hit then extensions.load('ng64Hit') end ng64Hit.spinStart(%f,%f,%f,%d)",
+      c.point[0], c.point[1], c.point[2], stubId or 0))
+    log("I", logTag, string.format("mario grabbed vehicle %d to spin it", id))
+  elseif kind == 5 then
+    -- spinning: point = his feet, yaw = the direction (bng, radians) the car points out from him, vel[0] = spin rate rad/s
+    veh:queueLuaCommand(string.format("if ng64Hit then ng64Hit.spinTarget(%f,%f,%f,%f,%f) end",
+      c.point[0], c.point[1], c.point[2], c.yaw, c.vel[0]))
   elseif kind == 3 then
     carryingId = nil
     hitGrace[id] = simTime     -- the usual grace after it leaves his hands
     if c.vel[0] ~= 0 or c.vel[1] ~= 0 then throwCount = throwCount + 1 end
-    veh:queueLuaCommand(string.format("if ng64Hit then ng64Hit.carryRelease(%f,%f,%f) end", c.vel[0], c.vel[1], c.vel[2]))
-    log("I", logTag, string.format("mario released vehicle %d (%.1f, %.1f, %.1f m/s)", id, c.vel[0], c.vel[1], c.vel[2]))
+    -- point is the tumble (angular velocity, rad/s) of a spin throw; zero for the ordinary throw
+    veh:queueLuaCommand(string.format("if ng64Hit then ng64Hit.carryRelease(%f,%f,%f,%f,%f,%f) end",
+      c.vel[0], c.vel[1], c.vel[2], c.point[0], c.point[1], c.point[2]))
+    log("I", logTag, string.format("mario released vehicle %d (%.1f, %.1f, %.1f m/s, tumble %.1f %.1f %.1f rad/s)", id,
+      c.vel[0], c.vel[1], c.vel[2], c.point[0], c.point[1], c.point[2]))
   end
+end
+
+-- the spinning car hit something (reported by the car's own Lua): Mario lets go, and whatever it struck is dented and
+-- shoved the way the car was moving
+function M.onSpinHit(selfId, otherId, px, py, pz, dx, dy, dz, frac)
+  sendRaw("b" .. packU32(selfId))
+  hitGrace[selfId] = simTime
+  local other = otherId ~= 0 and be:getObjectByID(otherId)
+  if other and otherId ~= stubId then
+    other:queueLuaCommand(string.format(
+      "if not ng64Hit then extensions.load('ng64Hit') end ng64Hit.hit(%f,%f,%f,%f,%f,%f,%f)",
+      px, py, pz, dx, dy, dz, 2 + 6 * frac))
+  end
+  log("I", logTag, string.format("spinning vehicle %d hit %s at %.1f%% of full spin", selfId,
+    other and ("vehicle " .. otherId) or "the world", frac * 100))
 end
 
 local floorReply   -- last MSG_FLOOR_REPLY (tests)
@@ -1283,8 +1313,8 @@ end
 
 -- UAT / console helpers
 -- flags (tests): y = press Y, music = press the music toggle
-local function scriptInput(stickX, stickY, a, b, z, frames, dirX, dirY, y, music, song)
-  local flags = (y and 1 or 0) + (music and 2 or 0) + (song == 1 and 4 or 0) + (song == -1 and 8 or 0)
+local function scriptInput(stickX, stickY, a, b, z, frames, dirX, dirY, y, music, song, hold)
+  local flags = (y and 1 or 0) + (music and 2 or 0) + (song == 1 and 4 or 0) + (song == -1 and 8 or 0) + (hold and 16 or 0)
   local extra = dirX and (packF(dirX, dirY) .. (flags > 0 and string.char(flags) or "")) or ""
   sendRaw("I" .. packF(stickX or 0, stickY or 0) .. string.char(a and 1 or 0, b and 1 or 0, z and 1 or 0) .. packU16(frames or 1) .. extra)
 end

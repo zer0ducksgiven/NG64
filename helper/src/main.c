@@ -63,6 +63,9 @@ extern uint32_t s_tick;   // simulation tick, defined with the frame sender
 #define ACT_DIVE_SLIDE        0x00880456
 #define ACT_THROWN_BACKWARD   0x010208BE
 #define ACT_FREEFALL          0x0100088C
+#define ACT_PICKING_UP_BOWSER 0x00000390
+#define ACT_HOLDING_BOWSER    0x00000391
+#define ACT_RELEASING_BOWSER  0x00000392
 
 // ---------------------------------------------------------------------------------------------------------------
 // coordinates: sm64 is Y-up, BeamNG is Z-up. sm = (x, z, -y) / S
@@ -1103,7 +1106,7 @@ static void read_pad(Pad *p)
     if (KEY(VK_SPACE)) p->a = 1;
     if (KEY('J')) p->b = 1;
     if (KEY('K')) p->z = 1;
-    if (KEY('E')) p->y = 1;
+    if (KEY('E')) { p->y = 1; p->yKey = 1; }
     if (KEY('M')) p->music = 1;
     if (KEY(VK_OEM_6)) p->songNext = 1;   // ]
     if (KEY(VK_OEM_4)) p->songPrev = 1;   // [
@@ -1120,7 +1123,19 @@ static void read_pad(Pad *p)
 #define ACT_FLAG_THROWING_BIT 0x80000000u
 #define CARRY_REACH_M 1.5f   // from Mario (chest height) to the nearest point of a piece he faces (as far as the old 0.4 m-ahead point + 1 m reached)
 
-static struct { int active; uint32_t vehId; int piece, heavy; } s_carry;
+static struct {
+    int active; uint32_t vehId; int piece, heavy;
+    int spin, spinAuto, relReq;   // Bowser-style spin; the keyboard winds it up by itself; Y was let go
+    float prevFace, omega;        // his facing last tick, and the spin rate (rad/s) worked out from it
+    float carOff;                 // the car points out from him this far round (bng yaw) from the way he faces
+    uint32_t breakVeh;            // the mod says this car hit something
+} s_carry;
+// Y pressed on a car and still down: a tap is the ordinary lift, a hold is the spin grab
+static struct { int on; uint32_t vehId; uint32_t tick; int key; } s_spinPend;
+static int s_scriptYHold;   // UAT: Y held for this many ticks
+static float s_spinStickAng;   // the keyboard's stand-in for circling the stick
+#define SPIN_HOLD_TICKS 8   // ~0.27 s
+#define SPIN_OMEGA_MAX 11.78f   // rad/s: 0x1000 SM64 angle units a frame, SM64's fastest spin
 static int s_injectB, s_prevY, s_scriptY, s_prevZ, s_effZ;
 static int s_inputEnabled = 1;
 
@@ -1266,16 +1281,130 @@ static Vehicle *carry_target(const Mario *m, int *pieceOut)
     }
     return best;
 }
+// ---- lifting and spinning --------------------------------------------------------------------------------------------
+static void start_lift(Mario *m, Vehicle *v, int piece)
+{
+    const struct SM64MarioState *st = &m->state;
+    // the main body lifts overhead (heavy); a piece that came off lifts like a crate
+    int heavy = piece == 0;
+    SM64_AUDIO_SAFE(sm64_mario_pick_up(m->id, heavy != 0));
+    memset(&s_carry, 0, sizeof(s_carry));
+    s_carry.active = 1; s_carry.vehId = v->vehId; s_carry.piece = piece; s_carry.heavy = heavy;
+    vehicle_release(v);            // no collision while it's in his hands
+    v->held = 1;
+    v->collideAfterPending = 1;
+    send_carry(1, v, piece, heavy, NULL, st->faceAngle, NULL);
+    logf_("picked up vehicle %u piece %d (%s)", v->vehId, piece, heavy ? "heavy" : "light");
+}
+
+// Bowser-style: SM64's own grab, spin (circle the stick) and release. The car swings round him at his hands' height; the
+// mod keeps it there (kind 5 every tick) and reports back when it hits something.
+
+static void start_spin(Mario *m, Vehicle *v, int keyboard)
+{
+    const struct SM64MarioState *st = &m->state;
+    SM64_AUDIO_SAFE(sm64_mario_grab_bowser(m->id));
+    memset(&s_carry, 0, sizeof(s_carry));
+    s_carry.active = 1; s_carry.vehId = v->vehId; s_carry.heavy = 1;
+    s_carry.spin = 1; s_carry.spinAuto = keyboard; s_carry.prevFace = st->faceAngle;
+    s_spinStickAng = 0;
+    vehicle_release(v);
+    v->held = 1;
+    v->collideAfterPending = 1;
+    float posB[3];
+    sm2bng(st->position, posB);
+    // the car swings out from where it already is, so it never has to sweep through him to get into place
+    s_carry.carOff = atan2f(v->orgB[1] - posB[1], v->orgB[0] - posB[0]) - (st->faceAngle - PI / 2);
+    send_carry(4, v, 0, 1, posB, 0, NULL);
+    logf_("grabbed vehicle %u to spin (%s)", v->vehId, keyboard ? "keyboard: it winds up by itself" : "circle the stick");
+}
+
+static void finish_carry(Vehicle *v)
+{
+    v->held = 0;
+    v->collideAfter = s_tick + 45;   // collision back 1.5 s later, once it has flown clear of him
+    s_carry.active = 0;
+    s_carry.spin = 0;
+    s_carry.breakVeh = 0;
+}
+
+static void spin_update(Mario *m, Vehicle *v, int yNow)
+{
+    const struct SM64MarioState *st = &m->state;
+    uint32_t act = st->action;
+    int holding = act == ACT_HOLDING_BOWSER, grabbing = act == ACT_PICKING_UP_BOWSER, releasing = act == ACT_RELEASING_BOWSER;
+    float phi = (st->faceAngle - PI / 2) + s_carry.carOff;   // sm64 yaw -> bng yaw, then round to where the car is
+    float posB[3];
+    sm2bng(st->position, posB);
+    // his spin rate in rad/s: SM64 angle units per frame (0x10000 = a turn), 30 frames a second
+    float omega = sm64_mario_spin_rate(m->id) * (2 * PI / 65536.0f) * 30.0f;
+    if (holding || grabbing) s_carry.omega = omega;
+
+    if (s_carry.breakVeh == v->vehId) {
+        // the car hit something: he lets go, it drops (its own Lua already stopped holding it)
+        SM64_AUDIO_SAFE(sm64_mario_release_bowser(m->id, 1));
+        send_carry(3, v, 0, 3, NULL, phi, NULL);
+        logf_("spinning vehicle %u hit something at %.1f rad/s: dropped", v->vehId, s_carry.omega);
+        finish_carry(v);
+        return;
+    }
+    if (releasing) {
+        // let go of Y: the car flies the way it was moving, up at an angle and tumbling. Barely turning is a put-down.
+        float av = fabsf(s_carry.omega), vel[3] = { 0, 0, 0 }, w[3] = { 0, 0, 0 };
+        if (av > 0.8f) {
+            float frac = fminf(1.0f, av / SPIN_OMEGA_MAX);
+            float speed = 10.0f + 16.0f * frac;                  // m/s (the ordinary throw is ~13)
+            float elev = 38.0f * PI / 180.0f, dir = s_carry.omega > 0 ? 1.0f : -1.0f;
+            float tx = -sinf(phi) * dir, ty = cosf(phi) * dir;   // the way the car was moving
+            vel[0] = tx * speed * cosf(elev); vel[1] = ty * speed * cosf(elev); vel[2] = speed * sinf(elev);
+            float tumble = 2.5f + 4.0f * frac, roll = 1.5f + 2.5f * frac;   // rad/s: end over end, and along its length
+            w[0] = ty * tumble + tx * roll; w[1] = -tx * tumble + ty * roll; w[2] = 0;
+        }
+        send_carry(3, v, 0, 2, w, phi, vel);
+        logf_("%s vehicle %u (spin %.1f rad/s, %.1f m/s)", av > 0.8f ? "spin-threw" : "put down", v->vehId, s_carry.omega,
+              sqrtf(vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]));
+        finish_carry(v);
+        return;
+    }
+    if (!holding && !grabbing) {
+        // something else took him out of it (he was hurt): the car drops where it is
+        send_carry(3, v, 0, 3, NULL, phi, NULL);
+        logf_("spin ended by action %08x: dropped vehicle %u", (unsigned)act, v->vehId);
+        finish_carry(v);
+        return;
+    }
+    if (!yNow && holding && !s_carry.relReq) {   // Y let go once the grab is done: that's the throw (B, in SM64's terms)
+        s_carry.relReq = 1;
+        s_injectB = 1;
+    }
+    float velB[3] = { omega, 0, 0 };
+    send_carry(5, v, 0, 1, posB, phi, velB);
+}
+
 static void carry_update(Mario *m, const Pad *pad)
 {
     const struct SM64MarioState *st = &m->state;
-    int yEdge = (pad->y || s_scriptY) && !s_prevY;
-    s_prevY = pad->y || s_scriptY;
+    int yNow = pad->y || s_scriptY || s_scriptYHold > 0;
+    if (s_scriptYHold > 0) s_scriptYHold--;
+    int yEdge = yNow && !s_prevY;
+    s_prevY = yNow;
     s_scriptY = 0;
     Vehicle *v = s_carry.active ? vehicle_find(s_carry.vehId) : NULL;
-    if (s_carry.active && !v) { s_carry.active = 0; sm64_mario_drop_held(m->id); return; }   // the car was removed
+    if (s_carry.active && !v) {   // the car was removed
+        if (s_carry.spin) SM64_AUDIO_SAFE(sm64_mario_release_bowser(m->id, 1)); else sm64_mario_drop_held(m->id);
+        memset(&s_carry, 0, sizeof(s_carry));
+        return;
+    }
 
     if (!s_carry.active) {
+        if (s_spinPend.on) {
+            // Y went down on a car: a tap is the ordinary lift (done when he lets go), a hold is the spin grab
+            Vehicle *pv = vehicle_find(s_spinPend.vehId);
+            if (!pv || (st->action & ACT_FLAG_AIR)) s_spinPend.on = 0;
+            else if (!yNow) { s_spinPend.on = 0; start_lift(m, pv, 0); return; }
+            else if (s_tick - s_spinPend.tick >= SPIN_HOLD_TICKS) { s_spinPend.on = 0; start_spin(m, pv, s_spinPend.key); return; }
+            else return;
+        }
         if (!yEdge || (st->action & ACT_FLAG_AIR)) return;
         int piece = 0;
         v = carry_target(m, &piece);
@@ -1283,17 +1412,11 @@ static void carry_update(Mario *m, const Pad *pad)
             logf_("Y: nothing in reach (%s)", s_carryMiss);
             return;
         }
-        // the main body lifts overhead (heavy); a piece that came off lifts like a crate
-        int heavy = piece == 0;
-        SM64_AUDIO_SAFE(sm64_mario_pick_up(m->id, heavy != 0));
-        s_carry.active = 1; s_carry.vehId = v->vehId; s_carry.piece = piece; s_carry.heavy = heavy;
-        vehicle_release(v);            // no collision while it's in his hands
-        v->held = 1;
-        v->collideAfterPending = 1;
-        send_carry(1, v, piece, heavy, NULL, st->faceAngle, NULL);
-        logf_("picked up vehicle %u piece %d (%s)", v->vehId, piece, heavy ? "heavy" : "light");
+        if (piece != 0) { start_lift(m, v, piece); return; }   // a piece off a wreck is only lifted, never spun
+        s_spinPend.on = 1; s_spinPend.vehId = v->vehId; s_spinPend.tick = s_tick; s_spinPend.key = pad->yKey || s_scriptYHold > 0;
         return;
     }
+    if (s_carry.spin) { spin_update(m, v, yNow); return; }
 
     if (sm64_mario_is_holding(m->id)) {
         {
@@ -1713,6 +1836,7 @@ static void handle_packet(const uint8_t *p, int len)
     case MSG_SURFACES: load_level_surfaces(p, len); break;
     case MSG_WATER: load_water(p, len); break;
     case MSG_WATER_OBB: load_water_obb(p, len); break;
+    case MSG_SPIN_BREAK: if (len >= 4) memcpy(&s_carry.breakVeh, p, 4); break;
     case MSG_FLOOR_QUERY: {
         // tests: SM64's floor height under each point, to compare with BeamNG's own raycasts
         if (len < 6) break;
@@ -1839,6 +1963,7 @@ static void handle_packet(const uint8_t *p, int len)
             if (len >= 22 && (p[21] & 2)) s_scriptMusic = 1;       // 2 = music toggle,
             if (len >= 22 && (p[21] & 4)) s_scriptSong = 1;        // 4 = next song, 8 = previous
             if (len >= 22 && (p[21] & 8)) s_scriptSong = -1;
+            if (len >= 22 && (p[21] & 16)) s_scriptYHold = fr;      // 16 = Y held for the packet's frames
             if (len >= 21) {   // optional world direction (bng x, y) that "stick up" walks along
                 float d[3] = { 0, 0, 0 }, sd[3];
                 memcpy(d, p + 13, 8);
@@ -2119,6 +2244,12 @@ int main(int argc, char **argv)
                 if (s_script.frames > 0) {
                     sx = s_script.sx; sy = s_script.sy; a = s_script.a; b = s_script.b; z = s_script.z;
                     s_script.frames--;
+                }
+                if (s_carry.active && s_carry.spin && s_carry.spinAuto && m->state.action == ACT_HOLDING_BOWSER) {
+                    // no stick to circle on a keyboard: turn a virtual one fast enough that SM64's spin acceleration is
+                    // at its limit, so holding the key winds the spin up by itself
+                    s_spinStickAng += 1.5f;
+                    sx = cosf(s_spinStickAng); sy = sinf(s_spinStickAng);
                 }
                 in.stickX = sx; in.stickY = sy;
                 if (s_injectB) { b = 1; s_injectB = 0; }

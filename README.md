@@ -6,6 +6,8 @@ kicks and ground pounds, on any BeamNG map, against real soft-body vehicles.
 
 - Punch, kick, dive and ground-pound cars and watch them dent; land on a roof and it buckles.
 - Pick up a car (or a piece that's fallen off one) and throw it, like King Bob-omb.
+- Grab a whole car, spin it round you like Bowser's tail and hurl it: it flies far, tumbling, and anything the swing
+  hits is dented and knocked away.
 - Cars hurt Mario: get run over and he tumbles away, SM64-style.
 - Walks on the map's real collision (buildings, ramps, rails, rocks), on any level, and swims in the water BeamNG draws.
 - Super Mario 64's camera, its HUD (power meter, lives, coins, stars) and its music.
@@ -86,6 +88,7 @@ Input off for BeamNG.
 | C buttons (camera) | Right stick | Arrow keys |
 | Camera zoom | RB / LB / R1 / L1 / R / L | — |
 | Pick up / throw | Y / Triangle / Switch X (top button) | E |
+| Spin throw | Hold Y (Triangle / Switch X), circle the left stick, let go to throw | Hold E (it winds up by itself), let go |
 | Music on / off | Back (View) / Share or Create / Minus, tap | M |
 | Next / previous song | Hold Back + RB / LB | ] / [ |
 
@@ -120,6 +123,13 @@ Buttons are matched by position, so the bottom button always jumps whichever con
   notification area (Windows may keep it in the `^` overflow); hover it for "NG64 helper - running".
 - While you're Mario, BeamNG's big map (normally Back / M) is switched off, so the music keys don't open it.
 - **Music:** SM64's songs, from your ROM. All 34 can be cycled through; the current one shows on screen.
+- **Spin throw:** tap Y for the ordinary lift; *hold* it next to a car and Mario takes it by one end like Bowser's
+  tail. Circle the stick (any direction) to wind up the spin, up to SM64's fastest. He turns on the spot with the
+  car swinging round him. Let go of Y to throw: the car goes the way it was moving, up at an angle and tumbling, and
+  the faster the spin the further it goes (a ground-level throw is about 15 m; a full spin sends it 60 m or more). If
+  the swinging car hits another vehicle, a wall or the ground, the spin ends and it drops; whatever it struck is
+  dented and shoved. Wrecks' loose pieces can only be lifted, not spun. Holding Y without spinning for a few
+  seconds puts the car down.
 - **Traffic** sees Mario: AI cars slow down or steer round him instead of running him over.
 - **Switching vehicles:** TAB to another vehicle leaves Mario standing where he is; switch back to play him again.
   Replacing him in the vehicle selector removes him.

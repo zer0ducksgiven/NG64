@@ -115,6 +115,15 @@ stop `ng64helper` before testing a fresh build.
   every 5 s; `tests/audio_load_probe.py` loads every core and counts them.
 - Controllers: XInput plus DirectInput (`dinput.c`, its own thread: enumerating devices stalls ~150 ms). The
   DirectInput -> XInput layout mapping is pure (`pad_map.c`, `tests/pad_map_test.c`), `controller.ini` overrides it.
+- Spin throw: hold Y on a car (tap = ordinary lift: `s_spinPend` in `main.c` decides on release / 8 ticks) ->
+  `sm64_mario_grab_bowser` (SM64's ACT_PICKING_UP_BOWSER -> HOLDING_BOWSER, spin by circling the stick,
+  `helper/patches/libsm64-spin.patch`) -> Y released = B -> RELEASING_BOWSER = the throw. The keyboard winds up by
+  itself (a virtual stick turned 1.5 rad a tick). Carry kinds 4 (start), 5 (every tick: his feet, the direction the car
+  points out from him in bng yaw, spin rate), 3 with `heavy` = 2 (throw: velocity, tumble in `point`) or 3 (dropped).
+  The car's own Lua (`ng64Hit.lua` spin*) pulls every node to where a rigid body spinning with him would have it
+  (position + velocity springs and the centripetal term); a mean error over 0.8 m, a vehicle in
+  `mapmgr.objectCollisionIds`, or never reaching the hold ends the spin (`ng64.onSpinHit` -> `MSG_SPIN_BREAK`).
+  `tests/spin_probe.py [--wall|--shots]`, `tests/terrain_spin_probe.py`.
 - Water: `ng64World.water()` collects WaterBlock (surface = top of the box, any yaw) and WaterPlane objects,
   `MSG_WATER_OBB` sends them as rotated rectangles; SM64-port maps send their own boxes (`MSG_WATER`).
   `tests/water_probe.py`.

@@ -19,7 +19,7 @@ local function tune(dent, shove, nodes)
 end
 
 local pending = {}
-local carryUpdate, throwUpdate   -- defined with the carry code further down
+local carryUpdate, throwUpdate, spinUpdate, spinThrowUpdate   -- defined with the carry code further down
 
 local function hit(px, py, pz, dx, dy, dz, strength, shoveScale)
   local d = vec3(dx, dy, dz)
@@ -49,6 +49,8 @@ end
 local function updateGFX(dt)
   carryUpdate(dt)
   throwUpdate(dt)
+  spinUpdate(dt)
+  spinThrowUpdate(dt)
   if #pending == 0 then return end
   local nodeCount = obj:getNodeCount()
   for i = #pending, 1, -1 do
@@ -223,6 +225,184 @@ local CARRY_K = 90        -- 1/s^2
 local CARRY_C = 19        -- 1/s (about critically damped)
 local THROW_TIME = 0.05
 
+-- ------------------------------------------------------------------------------------------------------------------
+-- Spun by Mario, like Bowser by his tail: he holds one end of the car at his hands and turns on the spot, the car
+-- swinging round him. Every node is pulled to where the car would be if it were a rigid body rotating with Mario (a
+-- spring on position and velocity, plus the centripetal acceleration that circling takes), so the car stays a soft
+-- body that dents and collides: when it can't get where it should be, or touches another vehicle, the spin is over.
+local SPIN_K = 450            -- 1/s^2
+local SPIN_C = 34             -- 1/s
+local SPIN_GRIP = 0.95        -- from his axis to the end of the car he holds
+local SPIN_HAND_Z = 1.0       -- his hands above his feet
+local SPIN_TILT = math.rad(10)   -- the far end lifts this much at full spin (low enough to take other cars with it)
+local SPIN_OMEGA_MAX = 11.8   -- rad/s, SM64's fastest spin
+local SPIN_BLOCKED = 0.8      -- m: mean distance of the car from where the spin wants it that means it's stuck
+local SPIN_BLOCKED_MAX = 2.2  -- m: same, for its worst node
+
+local spin     -- { nodes = { {cid, mass, lx, ly, lz} }, grip, ext, stubId, t, reached, bad, vehBad, P, phi, omega, age }
+local spinThrow   -- { t, nodes = { {cid, mass, dvx, dvy, dvz} } }
+
+local function spinStart(mx, my, mz, stubId)
+  if spin then return end
+  local nodeCount = obj:getNodeCount()
+  local base = obj:getPosition()
+  local fwd, up = obj:getDirectionVector(), obj:getDirectionVectorUp()
+  local right = fwd:cross(up)
+  local com, mass = vec3(0, 0, 0), 0
+  for cid = 0, nodeCount - 1 do
+    local m = obj:getNodeMass(cid)
+    com = com + (base + obj:getNodePosition(cid)) * m
+    mass = mass + m
+  end
+  if mass <= 0 then return end
+  com = com / mass
+  local nodes, minF, maxF = {}, math.huge, -math.huge
+  for cid = 0, nodeCount - 1 do
+    local rel = base + obj:getNodePosition(cid) - com
+    local ly = rel:dot(fwd)
+    nodes[#nodes + 1] = { cid, obj:getNodeMass(cid), rel:dot(right), ly, rel:dot(up) }
+    if ly < minF then minF = ly end
+    if ly > maxF then maxF = ly end
+  end
+  -- he takes the end nearer to him
+  local grip = (vec3(mx, my, mz) - com):dot(fwd) >= 0 and 1 or -1
+  spin = { nodes = nodes, grip = grip, ext = grip > 0 and maxF or -minF, mass = mass, stubId = stubId or 0, t = 0, bad = 0, vehBad = 0 }
+end
+
+local function spinTarget(px, py, pz, phi, omega)
+  if not spin then return end
+  spin.P = { px, py, pz }
+  spin.phi, spin.omega, spin.age = phi, omega, 0
+end
+
+-- the car lets go of the spin and keeps a quarter of the speed it had
+local function spinDrop()
+  local s = spin
+  spin = nil
+  if not s then return end
+  local nodes = {}
+  for _, n in ipairs(s.nodes) do
+    local nv = obj:getNodeVelocityVector(n[1])
+    nodes[#nodes + 1] = { n[1], n[2], -0.75 * nv.x, -0.75 * nv.y, -0.75 * nv.z }
+  end
+  spinThrow = { t = THROW_TIME, nodes = nodes }
+end
+
+spinUpdate = function(dt)
+  if not spin or not spin.P then return end
+  local s = spin
+  -- a hitch (a long frame) must not turn into one huge push, or into a false "it's stuck": push for at most a frame's
+  -- worth and ignore how far it lags behind for a moment
+  if dt > 0.04 then s.grace = 0.6 end
+  s.grace = math.max(0, (s.grace or 0) - dt)
+  local fdt = math.min(dt, 0.04)
+  s.t = s.t + dt
+  s.age = s.age + dt
+  local px, py, pz = s.P[1], s.P[2], s.P[3]
+  local omega = s.omega
+  local phi = s.phi + omega * math.min(s.age, 0.07)   -- between his updates, keep turning
+  local frac = math.min(1, math.abs(omega) / SPIN_OMEGA_MAX)
+  local tilt = SPIN_TILT * frac
+  local ux, uy = math.cos(phi), math.sin(phi)
+  local ct, sn = math.cos(tilt), math.sin(tilt)
+  local Ox, Oy, Oz = ux * ct, uy * ct, sn                  -- outward from him, tilted up
+  local g = s.grip
+  local Fx, Fy, Fz = -g * Ox, -g * Oy, -g * Oz             -- the car's own forward: towards him if he holds its front
+  local Ux, Uy, Uz = -Fz * Fx, -Fz * Fy, 1 - Fz * Fz
+  local ul = math.sqrt(Ux * Ux + Uy * Uy + Uz * Uz)
+  Ux, Uy, Uz = Ux / ul, Uy / ul, Uz / ul
+  local Rx, Ry, Rz = Fy * Uz - Fz * Uy, Fz * Ux - Fx * Uz, Fx * Uy - Fy * Ux
+  local dist = SPIN_GRIP + s.ext
+  local Cx, Cy, Cz = px + Ox * dist, py + Oy * dist, pz + SPIN_HAND_Z + Oz * dist
+  local gain = math.min(1, 0.25 + 0.75 * s.t / 0.7)        -- the heave from the ground ramps in
+  local K, C = SPIN_K * gain, SPIN_C * (0.6 + 0.4 * gain)
+  local w2 = omega * omega
+  local base = obj:getPosition()
+  local err2, errMax, lead, leadSpeed2 = 0, 0, nil, -1
+  for _, n in ipairs(s.nodes) do
+    local cid, m, lx, ly, lz = n[1], n[2], n[3], n[4], n[5]
+    local wx, wy, wz = Cx + Rx * lx + Fx * ly + Ux * lz, Cy + Ry * lx + Fy * ly + Uy * lz, Cz + Rz * lx + Fz * ly + Uz * lz
+    local rx, ry = wx - px, wy - py
+    local p = obj:getNodePosition(cid)
+    local nv = obj:getNodeVelocityVector(cid)
+    local ex, ey, ez = wx - (base.x + p.x), wy - (base.y + p.y), wz - (base.z + p.z)
+    local ax = K * ex + C * (-omega * ry - nv.x) - w2 * rx
+    local ay = K * ey + C * (omega * rx - nv.y) - w2 * ry
+    local az = K * ez + C * (-nv.z) + 9.81
+    obj:applyForceVectorTime(cid, vec3(ax * m, ay * m, az * m), fdt)
+    local e2 = ex * ex + ey * ey + ez * ez
+    err2 = err2 + e2 * m
+    if e2 > errMax then errMax = e2 end
+    local sp2 = nv.x * nv.x + nv.y * nv.y + nv.z * nv.z
+    if sp2 > leadSpeed2 then leadSpeed2, lead = sp2, { base.x + p.x, base.y + p.y, base.z + p.z, nv.x, nv.y, nv.z } end
+  end
+  local err, worst = math.sqrt(err2 / s.mass), math.sqrt(errMax)
+  if err < 0.35 then s.reached = true end
+
+  -- is it hitting something? only once it has reached the hold: before that it's still being heaved off the ground
+  local hit, otherId, why = false, 0, ""
+  if s.reached and s.grace <= 0 then
+    if err > SPIN_BLOCKED or worst > SPIN_BLOCKED_MAX then s.bad = s.bad + dt else s.bad = 0 end
+    if s.bad >= 0.1 then hit, why = true, "off its path" end
+    local cols = mapmgr and mapmgr.objectCollisionIds
+    if cols then
+      local found
+      for k, cv in pairs(cols) do
+        local id = type(cv) == "number" and cv or k   -- an array of ids, or a set keyed by id
+        if type(id) == "number" and id ~= s.stubId and id ~= obj:getId() then found = id break end
+      end
+      if found then s.vehBad = s.vehBad + dt otherId = found s.lastVeh, s.lastVehT = found, s.t else s.vehBad = 0 end
+      if s.vehBad >= 0.04 then hit, why = true, "vehicle" end
+    end
+  elseif not s.reached and s.t > 3 then
+    hit, why = true, "never reached the hold"     -- jammed against something: give up
+  end
+  if hit and otherId == 0 and s.lastVeh and s.t - s.lastVehT < 0.5 then otherId = s.lastVeh end   -- it was just touching one
+  if hit and lead then
+    local speed = math.sqrt(leadSpeed2)
+    local dx, dy, dz = lead[4] / math.max(speed, 1e-3), lead[5] / math.max(speed, 1e-3), lead[6] / math.max(speed, 1e-3)
+    log("I", "ng64Hit", string.format("spin ended (%s): err %.2f m, worst %.2f m, t %.2f s, other vehicle %s", why, err, worst, s.t, tostring(otherId)))
+    spinDrop()
+    obj:queueGameEngineLua(string.format("ng64.onSpinHit(%d, %d, %f,%f,%f, %f,%f,%f, %f)", obj:getId(), otherId or 0,
+      lead[1], lead[2], lead[3], dx, dy, dz, frac))
+  end
+end
+
+-- thrown: every node gets the throw velocity plus the tumble (w x r about the car's centre), over a few physics steps
+local function spinRelease(vx, vy, vz, wx, wy, wz)
+  local s = spin
+  spin = nil
+  if not s then return end
+  local base = obj:getPosition()
+  local com, mass = vec3(0, 0, 0), 0
+  for _, n in ipairs(s.nodes) do
+    com = com + (base + obj:getNodePosition(n[1])) * n[2]
+    mass = mass + n[2]
+  end
+  com = com / mass
+  local nodes = {}
+  for _, n in ipairs(s.nodes) do
+    local r = base + obj:getNodePosition(n[1]) - com
+    local nv = obj:getNodeVelocityVector(n[1])
+    local tx, ty, tz = vx + wy * r.z - wz * r.y, vy + wz * r.x - wx * r.z, vz + wx * r.y - wy * r.x
+    nodes[#nodes + 1] = { n[1], n[2], tx - nv.x, ty - nv.y, tz - nv.z }
+  end
+  spinThrow = { t = THROW_TIME, nodes = nodes }
+end
+
+spinThrowUpdate = function(dt)
+  if not spinThrow then return end
+  local th = spinThrow
+  local step = math.min(dt, th.t)
+  for _, n in ipairs(th.nodes) do
+    local f = n[2] / THROW_TIME
+    obj:applyForceVectorTime(n[1], vec3(n[3] * f, n[4] * f, n[5] * f), step)
+  end
+  th.t = th.t - step
+  if th.t <= 1e-4 then spinThrow = nil end
+end
+
+
 local carry            -- { nodes = { {cid, mass, offx, offy, offz} }, lift, yaw0, target, yaw }
 
 local function carryStart(piece)
@@ -279,7 +459,8 @@ carryUpdate = function(dt)
   end
 end
 
-local function carryRelease(vx, vy, vz)
+local function carryRelease(vx, vy, vz, wx, wy, wz)
+  if spin then return spinRelease(vx, vy, vz, wx or 0, wy or 0, wz or 0) end
   if not carry then return end
   -- give the whole piece the throw velocity (over a few physics steps), then let it fly
   local sum, mass = vec3(0, 0, 0), 0
@@ -304,6 +485,7 @@ end
 local function onReset()
   pending = {}
   carry = nil
+  spin, spinThrow = nil, nil
 end
 
 M.hit = hit
@@ -312,6 +494,8 @@ M.sendHull = sendHull
 M.carryStart = carryStart
 M.carryTarget = carryTarget
 M.carryRelease = carryRelease
+M.spinStart = spinStart
+M.spinTarget = spinTarget
 M.updateGFX = updateGFX
 M.onReset = onReset
 return M

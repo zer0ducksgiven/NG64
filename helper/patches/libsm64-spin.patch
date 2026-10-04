@@ -1,0 +1,47 @@
+--- a/src/libsm64.c
++++ b/src/libsm64.c
+@@ -802,3 +802,30 @@
+     extern u8 sCurrentBackgroundMusicSeqId, sBackgroundMusicQueueSize;
+     return ( (uint32_t)sBackgroundMusicQueueSize << 16 ) | ( gSequencePlayers[SEQ_PLAYER_LEVEL].enabled ? 0x100u : 0u ) | sCurrentBackgroundMusicSeqId;
+ }
++
++// ---- NG64: Bowser-style grab, spin and release of a held thing ---------------------------------------------------
++// SM64's own Bowser actions: grab (he takes it by the tail), spin it by circling the stick (the spin rate builds up and
++// he turns on the spot), release (throw, or drop). The held object is the same placeholder the carry uses.
++SM64_LIB_FN void sm64_mario_grab_bowser(int32_t marioId)
++{
++    if( !ng64_bind( marioId ) || marioId >= NG64_MAX_HELD ) return;
++    struct Object *o = &s_ng64_held[marioId];
++    memset( o, 0, sizeof( *o ));
++    gMarioState->heldObj = NULL;
++    gMarioState->usedObj = o;
++    set_mario_action( gMarioState, ACT_PICKING_UP_BOWSER, 0 );
++}
++
++// drop: 1 lets it go where it is, 0 is the throw. Either way he plays the release.
++SM64_LIB_FN void sm64_mario_release_bowser(int32_t marioId, bool drop)
++{
++    if( !ng64_bind( marioId )) return;
++    set_mario_action( gMarioState, ACT_RELEASING_BOWSER, drop ? 1 : 0 );
++}
++
++// his spin rate while holding: signed, SM64 angle units per frame (0x1000 is the most)
++SM64_LIB_FN int32_t sm64_mario_spin_rate(int32_t marioId)
++{
++    if( !ng64_bind( marioId )) return 0;
++    return gMarioState->angleVel[1];
++}
+--- a/src/libsm64.h
++++ b/src/libsm64.h
+@@ -190,6 +190,11 @@
+ extern SM64_LIB_FN void sm64_ng64_music_stop(uint16_t fadeFrames);
+ extern SM64_LIB_FN uint32_t sm64_ng64_music_status(void);
+ 
++// NG64 additions: Bowser-style grab, spin (circle the stick) and release
++extern SM64_LIB_FN void sm64_mario_grab_bowser(int32_t marioId);
++extern SM64_LIB_FN void sm64_mario_release_bowser(int32_t marioId, bool drop);
++extern SM64_LIB_FN int32_t sm64_mario_spin_rate(int32_t marioId);
++
+ extern SM64_LIB_FN uint32_t sm64_surface_object_create( const struct SM64SurfaceObject *surfaceObject );
+ extern SM64_LIB_FN void sm64_surface_object_move( uint32_t objectId, const struct SM64ObjectTransform *transform );
+ extern SM64_LIB_FN void sm64_surface_object_delete( uint32_t objectId );

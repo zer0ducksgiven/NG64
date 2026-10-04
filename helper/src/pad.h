@@ -4,7 +4,7 @@
 #ifndef NG64_PAD_H
 #define NG64_PAD_H
 
-typedef struct { float lx, ly, rx, ry; int a, b, z, zoomIn, zoomOut, y, music, songNext, songPrev; } Pad;
+typedef struct { float lx, ly, rx, ry; int a, b, z, zoomIn, zoomOut, y, music, songNext, songPrev, yKey; } Pad;   // yKey: Y was the keyboard's E
 
 // One DirectInput device's raw state: axes -32768..32767 in DirectInput's order (X, Y, Z, Rx, Ry, Rz, slider 0, 1),
 // buttons 0-based. axisMask has bit i set for the axes the device really has.

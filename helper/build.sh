@@ -16,6 +16,7 @@ cd '$HERE/../libsm64-master'
 # changed the file's end, and re-applies with fuzz)
 grep -q 'sm64_mario_pick_up' src/libsm64.c || patch -p1 -s < '$HERE/patches/libsm64-carry.patch'
 grep -q 'sm64_ng64_music_play' src/libsm64.c || patch -p1 -s < '$HERE/patches/libsm64-music.patch'
+grep -q 'sm64_mario_grab_bowser' src/libsm64.c || patch -p1 -s < '$HERE/patches/libsm64-spin.patch'
 grep -q 'g_ng64PartCount' src/gfx_adapter.c || patch -p1 -s < '$HERE/patches/libsm64-parts.patch'
 grep -q 'read from the player' Makefile || patch -p1 -s < '$HERE/patches/libsm64-rommodel.patch'
 # anything ever downloaded from the decomp goes, sources and objects, so it can't end up in the helper

@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define NG64_PORT          47064
-#define NG64_PROTO_VERSION 10
+#define NG64_PROTO_VERSION 11
 
 // BeamNG metres per SM64 unit (same scale sm64-san-andreas uses for GTA).
 #define NG64_SCALE 0.0085f
@@ -33,6 +33,7 @@
                            // surfaces with their original types (chunks = 0 clears them). Replaces nothing else
 #define MSG_WATER     'J'  // u8 count; count * {f32 x0, y0, x1, y1, z} (bng): water boxes (count = 0: no water)
 #define MSG_WATER_OBB 'j'  // u8 count; count * {f32 cx, cy, halfX, halfY, cosYaw, sinYaw, z} (bng): BeamNG's own water, rotated rectangles
+#define MSG_SPIN_BREAK 'b' // u32 vehId: the car Mario is spinning hit something, he lets go
 #define MSG_PART_REQ  'B'  // u32 key; u8 part; u32 hash - the client has no geometry for this part/hash (lost or new)
 
 // helper -> client

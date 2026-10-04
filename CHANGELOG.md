@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0
+
+**Spin throw**
+- Hold Y (Triangle, Switch X, or E on the keyboard) next to a car and Mario grabs it like Bowser's tail. Circle the stick to
+  spin it round him, then let go to throw: the car flies far at an angle, tumbling, and the faster the spin the
+  further it goes. Tapping Y still lifts and throws as before.
+- The spinning car collides: if it hits another vehicle, a wall or the ground the spin ends and the car drops, and
+  whatever it hit is dented and knocked away.
+
 ## 0.1.3
 
 - DualSense (and other pads Windows lists as a "first person" device) weren't found by the DirectInput reader; now they are.
