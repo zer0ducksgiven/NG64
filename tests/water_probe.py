@@ -16,7 +16,7 @@ def status():
 
 fails = 0
 # (name, x, y, drop height, the surface BeamNG draws there)
-for name, x, y, z0, surface in (("lake (WaterBlock)", 654.6, -817.6, 172, 162.2), ("ocean (WaterPlane)", 0, 1000, 90, 70.7)):
+for name, x, y, z0, surface in (("lake (WaterBlock)", 654.6, -817.6, 172, 156.2), ("ocean (WaterPlane)", 0, 1000, 90, 70.7)):
     lua("ng64.teleport(%f,%f,%f,true) return 1" % (x, y, z0))
     time.sleep(9)
     s = status()

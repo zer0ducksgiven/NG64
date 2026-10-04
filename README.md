@@ -9,6 +9,7 @@ kicks and ground pounds, on any BeamNG map, against real soft-body vehicles.
 - Grab a whole car, spin it round you like Bowser's tail and hurl it: it flies far, tumbling, and anything the swing
   hits is dented and knocked away.
 - Cars hurt Mario: get run over and he tumbles away, SM64-style.
+- Fire hurts Mario too: touch the flames of a burning vehicle and he catches fire, SM64-style (jump into water to put it out).
 - Walks on the map's real collision (buildings, ramps, rails, rocks), on any level, and swims in the water BeamNG draws.
 - Super Mario 64's camera, its HUD (power meter, lives, coins, stars) and its music.
 - Multiplayer through BeamMP.

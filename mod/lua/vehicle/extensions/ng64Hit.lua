@@ -19,7 +19,7 @@ local function tune(dent, shove, nodes)
 end
 
 local pending = {}
-local carryUpdate, throwUpdate, spinUpdate, spinThrowUpdate   -- defined with the carry code further down
+local carryUpdate, throwUpdate, spinUpdate, spinThrowUpdate, fireUpdate   -- defined further down
 
 local function hit(px, py, pz, dx, dy, dz, strength, shoveScale)
   local d = vec3(dx, dy, dz)
@@ -51,6 +51,7 @@ local function updateGFX(dt)
   throwUpdate(dt)
   spinUpdate(dt)
   spinThrowUpdate(dt)
+  fireUpdate(dt)
   if #pending == 0 then return end
   local nodeCount = obj:getNodeCount()
   for i = #pending, 1, -1 do
@@ -485,6 +486,36 @@ throwUpdate = function(dt)
   for _, n in ipairs(carry.nodes) do obj:applyForceVectorTime(n[1], th.dv * (n[2] / THROW_TIME), step) end
   th.t = th.t - step
   if th.t <= 1e-4 then carry = nil end
+end
+
+-- ------------------------------------------------------------------------------------------------------------------
+-- Fire: Mario catches fire from a flame, and only the car knows where its flames are. Its burning nodes (BeamNG's fire
+-- module) go to the game side ~10 times a second, and an empty list once when they're out.
+local fireAt, fireSent = 0, false
+fireUpdate = function(dt)
+  fireAt = fireAt - dt
+  if fireAt > 0 then return end
+  fireAt = 0.1
+  local hot = fire and fire.hotNodes
+  local parts, n = {}, 0
+  if hot then
+    local base = obj:getPosition()
+    for cid, node in pairs(hot) do
+      local intensity = node.intensity or 0
+      if intensity > 0.02 and n < 12 then
+        local p = obj:getNodePosition(cid)
+        parts[#parts + 1] = string.format("%.2f,%.2f,%.2f,%.2f", base.x + p.x, base.y + p.y, base.z + p.z, intensity)
+        n = n + 1
+      end
+    end
+  end
+  if n > 0 then
+    obj:queueGameEngineLua(string.format("ng64.onFire(%d,%s)", obj:getId(), table.concat(parts, ",")))
+    fireSent = true
+  elseif fireSent then
+    obj:queueGameEngineLua(string.format("ng64.onFire(%d)", obj:getId()))
+    fireSent = false
+  end
 end
 
 local function onReset()

@@ -371,8 +371,9 @@ function M.prefetch(cx, cy, r)
   return #want
 end
 
--- BeamNG's own water, for Mario to swim in: WaterBlock volumes (the surface is the top of the box, at any yaw) and
--- WaterPlanes (flat and endless). Each is {centre x, y, half width, half length, cos yaw, sin yaw, surface z}.
+-- BeamNG's own water, for Mario to swim in. A WaterBlock's surface is at its position height (checked against a ray cast
+-- onto it); its box reaches that far below the surface for depth, at any yaw. A WaterPlane is flat and endless. Each is
+-- {centre x, y, half width, half length, cos yaw, sin yaw, surface z, depth}.
 function M.water()
   local list = {}
   for _, cls in ipairs({ "WaterBlock", "WaterPlane" }) do
@@ -381,11 +382,11 @@ function M.water()
       if o and #list < 64 then
         local p = o:getPosition()
         if cls == "WaterPlane" then
-          list[#list + 1] = { p.x, p.y, 1e7, 1e7, 1, 0, p.z }
+          list[#list + 1] = { p.x, p.y, 1e7, 1e7, 1, 0, p.z, 1e7 }
         else
           local s, q = o:getScale(), o:getRotation()
           local yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
-          list[#list + 1] = { p.x, p.y, s.x * 0.5, s.y * 0.5, math.cos(yaw), math.sin(yaw), p.z + s.z * 0.5 }
+          list[#list + 1] = { p.x, p.y, s.x * 0.5, s.y * 0.5, math.cos(yaw), math.sin(yaw), p.z, s.z * 0.5 }
         end
       end
     end

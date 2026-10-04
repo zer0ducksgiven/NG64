@@ -11,7 +11,7 @@ local world = require("ge/extensions/ng64World")
 local hud = require("ge/extensions/ng64Hud")
 
 local HELPER_HOST, HELPER_PORT = "127.0.0.1", 47064
-local PROTO_VERSION = 11
+local PROTO_VERSION = 12
 local STUB_MODEL = "ng64_mario"
 
 local GRID_N, GRID_SP = 49, 0.5         -- terrain sample grid around Mario (24 m square)
@@ -686,7 +686,7 @@ local function sendLevelSurfaces()
   if not levelSurfaces then   -- a map that isn't an SM64 port: the water BeamNG draws
     local beam = world.water()
     local parts = { string.char(#beam) }
-    for _, b in ipairs(beam) do parts[#parts + 1] = packF(b[1], b[2], b[3], b[4], b[5], b[6], b[7]) end
+    for _, b in ipairs(beam) do parts[#parts + 1] = packF(b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8]) end
     sendRaw("j" .. table.concat(parts))
     log("I", logTag, string.format("water: %d volumes", #beam))
   end
@@ -808,6 +808,51 @@ local restoreCameraUntil = -1   -- after Mario goes, keep handing the camera bac
 -- WASD moves the free camera Mario's camera runs in, Space / arrows are the parking brake, throttle and steering.
 -- (One table, "fixes", for these helpers: this file is at Lua's limit of 200 top-level locals.)
 local fixes = {}
+
+-- Fire: every car reports its own burning nodes (ng64Hit, from BeamNG's fire module); the ones near Mario go to the helper
+-- ~10 times a second as flame spheres, and it sets him alight when one touches him. Each report is kept for 0.6 s.
+fixes.fires = {}      -- vehicle id -> { t = simTime, pts = { {x, y, z, intensity}, ... } }
+fixes.fireAt, fixes.fireSentN = 0, 0
+function M.onFire(id, ...)
+  if select("#", ...) == 0 then fixes.fires[id] = nil return end
+  local a, pts = { ... }, {}
+  for i = 1, #a - 3, 4 do pts[#pts + 1] = { a[i], a[i + 1], a[i + 2], a[i + 3] } end
+  fixes.fires[id] = { t = simTime, pts = pts }
+end
+
+function fixes.sendFire(marioPos, dt)
+  fixes.fireAt = fixes.fireAt - dt
+  if fixes.fireAt > 0 then return end
+  fixes.fireAt = 0.1
+  local out, n = {}, 0
+  for id, f in pairs(fixes.fires) do
+    if simTime - f.t > 0.6 then
+      fixes.fires[id] = nil
+    else
+      for _, p in ipairs(f.pts) do
+        if n < 32 and (p[1] - marioPos.x) ^ 2 + (p[2] - marioPos.y) ^ 2 + (p[3] - marioPos.z) ^ 2 < 36 then
+          -- a hotter node burns bigger: 0.4 m for a flicker up to a metre for a blaze (nodes sit inside the bodywork: flames lick out well past them)
+          out[#out + 1] = packF(p[1], p[2], p[3], 0.4 + 0.6 * math.min(1, p[4] / 0.4))
+          n = n + 1
+        end
+      end
+    end
+  end
+  if n > 0 or fixes.fireSentN > 0 then sendRaw("k" .. string.char(n) .. table.concat(out)) end
+  fixes.fireSentN = n
+end
+
+-- while he burns, flames come off him (BeamNG's own fire particles, from the anchor vehicle's nodes)
+fixes.burning = { [0x00020449] = true, [0x010208B4] = true, [0x010208B5] = true }
+function fixes.burnEffect(action, dt)
+  fixes.burnAt = (fixes.burnAt or 0) - dt
+  if not fixes.burning[action or 0] or fixes.burnAt > 0 then return end
+  fixes.burnAt = 0.03   -- about every frame: he moves fast, and the flames are left where they were made
+  local stub = stubId and be:getObjectByID(stubId)
+  if stub then
+    stub:queueLuaCommand("for _, c in ipairs({0, 3, 8}) do obj:addParticleByNodesRelative(c, 3, -1, 27, 0, 1) obj:addParticleByNodesRelative(c, 3, -1, 25, 0, 1) end obj:addParticleByNodesRelative(3, 8, -1, 29, 0, 1)")
+  end
+end
 fixes.marioBlockedActions = {
   "toggleBigMap", "pause", "toggleRadialMenuMulti", "parkingbrake", "steadycamJump",
   "moveforward", "movebackward", "moveleft", "moveright",
@@ -1216,6 +1261,8 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     prof("vehicles")
     checkVehicleHurt(pos, lastLocalFrame.vel, dt)
     fixes.tellTraffic(pos, lastLocalFrame)
+    fixes.sendFire(pos, dt)
+    fixes.burnEffect(lastLocalFrame.action, dt)
     fixes.checkUnderTerrain(pos)
     sendMpState(dt)
     if controlled then applyCamera() end
@@ -1333,7 +1380,7 @@ local function getStatus()
   return {
     connected = connected, active = active, controlled = controlled, stubId = stubId, material = materialName,
     pos = f and { f.pos.x, f.pos.y, f.pos.z }, health = f and f.health, action = f and f.action,
-    numVerts = f and f.numVerts, frameAge = f and (simTime - localFrameTime), hits = hitCount, hurts = hurtCount, hulls = hullCount, carDents = carDentCount, meshBuilds = meshBuilds, poseUpdates = poseUpdates, hullPieces = hullPieces, carrying = carryingId, carries = carryCount, throws = throwCount, worldTris = meshTris, world = world.stats(), lastToast = lastToast, profCreate = profCreate, framesStarted = framesStarted, framesCompleted = framesCompleted,
+    numVerts = f and f.numVerts, frameAge = f and (simTime - localFrameTime), hits = hitCount, hurts = hurtCount, hulls = hullCount, carDents = carDentCount, meshBuilds = meshBuilds, poseUpdates = poseUpdates, hullPieces = hullPieces, carrying = carryingId, carries = carryCount, throws = throwCount, worldTris = meshTris, world = world.stats(), lastToast = lastToast, fires = (function() local n = 0 for _, f in pairs(fixes.fires) do n = n + #f.pts end return n end)(), profCreate = profCreate, framesStarted = framesStarted, framesCompleted = framesCompleted,
     meshes = (function() local n = 0 for _ in pairs(meshes) do n = n + 1 end return n end)(),
     hud = hud.getState(),
   }

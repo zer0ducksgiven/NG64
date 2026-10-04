@@ -437,7 +437,7 @@ static void load_water(const uint8_t *p, int len)
 }
 
 #define MAX_WATER_OBB 64
-static float s_waterObb[MAX_WATER_OBB][7];   // cx, cy, halfX, halfY, cos, sin, z (bng): BeamNG's own water
+static float s_waterObb[MAX_WATER_OBB][8];   // cx, cy, halfX, halfY, cos, sin, surface z, depth (bng): BeamNG's own water
 static int s_waterObbCount;
 
 static void load_water_obb(const uint8_t *p, int len)
@@ -445,8 +445,8 @@ static void load_water_obb(const uint8_t *p, int len)
     if (len < 1) return;
     int n = p[0];
     if (n > MAX_WATER_OBB) n = MAX_WATER_OBB;
-    if (len < 1 + n * 28) return;
-    memcpy(s_waterObb, p + 1, (size_t)n * 28);
+    if (len < 1 + n * 32) return;
+    memcpy(s_waterObb, p + 1, (size_t)n * 32);
     s_waterObbCount = n;
     logf_("water volumes: %d", n);
 }
@@ -464,7 +464,8 @@ static int water_level_at(const float *sp)
         const float *w = s_waterObb[i];
         float dx = bx - w[0], dy = by - w[1];
         float lx = dx * w[4] + dy * w[5], ly = -dx * w[5] + dy * w[4];   // into the rectangle's own axes
-        if (fabsf(lx) <= w[2] && fabsf(ly) <= w[3] && w[6] / S > best) best = w[6] / S;
+        // under a lake's bed (a tunnel below it) is not in the water: it reaches only `depth` below its surface
+        if (fabsf(lx) <= w[2] && fabsf(ly) <= w[3] && sp[1] * S >= w[6] - w[7] && w[6] / S > best) best = w[6] / S;
     }
     return (int)lroundf(best);
 }
@@ -1286,6 +1287,46 @@ static Vehicle *carry_target(const Mario *m, int *pieceOut, int onlyBody)
     }
     return best;
 }
+// ---- fire --------------------------------------------------------------------------------------------------------------
+// Burning vehicle nodes near him, sent by the mod (each car reports its own fire). A flame reaching his body sets him
+// alight with SM64's own burn: the pain animation, health draining until the flames die out (a burn can kill).
+#define MAX_FIRE 32
+static float s_fire[MAX_FIRE][4];   // x, y, z (bng), radius (m)
+static int s_fireN;
+static uint32_t s_fireTick;
+
+static void load_fire(const uint8_t *p, int len)
+{
+    extern uint32_t s_tick;
+    if (len < 1) return;
+    int n = p[0];
+    if (n > MAX_FIRE) n = MAX_FIRE;
+    if (len < 1 + n * 16) return;
+    memcpy(s_fire, p + 1, (size_t)n * 16);
+    s_fireN = n;
+    s_fireTick = s_tick;
+}
+
+static void check_fire(Mario *m)
+{
+    extern uint32_t s_tick;
+    if (!s_fireN || s_tick - s_fireTick > 20) return;   // none, or the mod stopped sending
+    const struct SM64MarioState *st = &m->state;
+    float b[3];
+    sm2bng(st->position, b);
+    for (int i = 0; i < s_fireN; i++) {
+        const float *f = s_fire[i];
+        // his body is a vertical line from his shins to his head; a flame within its radius of it touches him
+        float zc = fminf(fmaxf(f[2], b[2] + 0.1f), b[2] + 1.5f);
+        float dx = f[0] - b[0], dy = f[1] - b[1], dz = f[2] - zc;
+        if (sqrtf(dx * dx + dy * dy + dz * dz) > f[3] + 0.15f) continue;
+        int caught = 0;
+        SM64_AUDIO_SAFE(caught = sm64_mario_burn(m->id));
+        if (caught) logf_("caught fire: flame %.2f m away (radius %.2f), health %d", sqrtf(dx * dx + dy * dy + dz * dz), f[3], st->health);
+        return;
+    }
+}
+
 // ---- lifting and spinning --------------------------------------------------------------------------------------------
 static float angdiff(float a, float b);
 static void start_lift(Mario *m, Vehicle *v, int piece)
@@ -1882,6 +1923,7 @@ static void handle_packet(const uint8_t *p, int len)
     case MSG_SURFACES: load_level_surfaces(p, len); break;
     case MSG_WATER: load_water(p, len); break;
     case MSG_WATER_OBB: load_water_obb(p, len); break;
+    case MSG_FIRE: load_fire(p, len); break;
     case MSG_SPIN_BREAK: if (len >= 4) memcpy(&s_carry.breakVeh, p, 4); break;
     case MSG_FLOOR_QUERY: {
         // tests: SM64's floor height under each point, to compare with BeamNG's own raycasts
@@ -2338,6 +2380,7 @@ int main(int argc, char **argv)
             }
             if (m->key == 0) {
                 update_camera(m, &pad, (float)tickSec);
+                check_fire(m);
                 carry_update(m, &pad);
                 check_attacks(m);
                 check_landing(m);

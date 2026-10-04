@@ -1,11 +1,21 @@
 # Changelog
 
-## 0.2.0
+## 0.1.4
+
+**Fire**
+- Mario catches fire from the flames of burning vehicles (a fuel leak that ignites, a wreck on fire), on the bodywork or low
+  down near the ground. He plays SM64's burning pain animation, runs about in flames, and loses health as in SM64 (about
+  three wedges per burn, and a burn can cost a life). Water puts him out.
+
+**Water**
+- Fixed Mario floating several metres above BeamNG water (Gridmap's pool, the lakes on West Coast USA): a water block's
+  surface is at its own height, not the top of its box. Mario also no longer swims in the air under a lake's bed.
 
 **Spin throw**
-- Hold Y (Triangle, Switch X, or E on the keyboard) next to a car and Mario grabs it like Bowser's tail. Circle the stick to
-  spin it round him, then let go to throw: the car flies far at an angle, tumbling, and the faster the spin the
-  further it goes. Tapping Y still lifts and throws as before.
+- Hold Y (Triangle, Switch X, or E on the keyboard) next to a car and Mario grabs it like Bowser's tail, holding it out in
+  front of him at his gloves. Circle the stick to spin it round him (the keyboard winds up by itself), then let go to
+  throw: the car flies far at an angle, tumbling, and the faster the spin the further it goes. Tapping Y still lifts and
+  throws as before.
 - The spinning car collides: if it hits another vehicle, a wall or the ground the spin ends and the car drops, and
   whatever it hit is dented and knocked away.
 - On a wrecked car, holding Y spins its main body even when a loose wheel or panel is nearer (a tap still lifts the

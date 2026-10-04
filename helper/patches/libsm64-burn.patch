@@ -1,0 +1,34 @@
+--- a/src/libsm64.c
++++ b/src/libsm64.c
+@@ -829,3 +829,19 @@
+     if( !ng64_bind( marioId )) return 0;
+     return gMarioState->angleVel[1];
+ }
++
++// ---- NG64: catching fire ---------------------------------------------------------------------------------------
++// SM64's interact_flame: he catches fire (the burning pain action: his health drains until the flames die out, and the
++// burn kills at 0). Not in water, not with a metal or vanish cap on, not while already burning or hurt (invulnerable).
++// Returns true if he caught fire.
++SM64_LIB_FN bool sm64_mario_burn(int32_t marioId)
++{
++    if( !ng64_bind( marioId )) return false;
++    struct MarioState *m = gMarioState;
++    if( ( m->action & ACT_FLAG_INVULNERABLE ) || m->invincTimer > 0 ) return false;
++    if( m->flags & ( MARIO_METAL_CAP | MARIO_VANISH_CAP )) return false;
++    if( ( m->action & ( ACT_FLAG_SWIMMING | ACT_FLAG_METAL_WATER )) || m->waterLevel - m->pos[1] > 150.0f ) return false;
++    m->marioObj->oMarioBurnTimer = 0;
++    drop_and_set_mario_action( m, ( ( m->action & ACT_FLAG_AIR ) && m->vel[1] <= 0.0f ) ? ACT_BURNING_FALL : ACT_BURNING_JUMP, 1 );
++    return true;
++}
+--- a/src/libsm64.h
++++ b/src/libsm64.h
+@@ -195,6 +195,9 @@
+ extern SM64_LIB_FN void sm64_mario_release_bowser(int32_t marioId, bool drop);
+ extern SM64_LIB_FN int32_t sm64_mario_spin_rate(int32_t marioId);
+ 
++// NG64 addition: catch fire (SM64's burning pain action); false if he is in water, wears a metal / vanish cap, or is already burning or hurt
++extern SM64_LIB_FN bool sm64_mario_burn(int32_t marioId);
++
+ extern SM64_LIB_FN uint32_t sm64_surface_object_create( const struct SM64SurfaceObject *surfaceObject );
+ extern SM64_LIB_FN void sm64_surface_object_move( uint32_t objectId, const struct SM64ObjectTransform *transform );
+ extern SM64_LIB_FN void sm64_surface_object_delete( uint32_t objectId );
