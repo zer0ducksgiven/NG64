@@ -289,6 +289,7 @@ static uint16_t s_nextId = 1;
 static u32 s_nextPickupSpawn, s_nextEnemySpawn;
 static int s_starTicks;        // the invincibility star
 static int s_prevCapFlags;
+static struct { int on; float pos[3]; } s_focus;   // the car the player drives away from Mario (SM64 units)
 // a red coin course, as a level's: eight red coins and the hidden red coin star (bhvHiddenRedCoinStar) with its marker
 static struct { int active, count, timer; float star[3]; uint16_t markerId; } s_red;
 static int s_starSpawnJingle;   // ticks of the star-spawn jingle still to play (main.c's music override)
@@ -785,7 +786,9 @@ static s16 obj_random_fixed_turn(Obj *o, s16 delta) { return (s16)(o->moveYaw + 
 
 static int is_point_within_radius_of_mario(float x, float y, float z, int dist)
 {
-    return sqr(x - M.pos[0]) + sqr(y - M.pos[1]) + sqr(z - M.pos[2]) < (float)(dist * dist);
+    if (sqr(x - M.pos[0]) + sqr(y - M.pos[1]) + sqr(z - M.pos[2]) < (float)(dist * dist)) return 1;
+    // round the car the player drives they go on as they would round Mario (a bob-omb waits for nobody otherwise)
+    return s_focus.on && sqr(x - s_focus.pos[0]) + sqr(y - s_focus.pos[1]) + sqr(z - s_focus.pos[2]) < (float)(dist * dist);
 }
 
 static int obj_check_if_facing_toward_angle(u32 base, u32 goal, s16 range)
@@ -2298,15 +2301,23 @@ static int pick_weighted(const int *types, const int *weights, int n)
 }
 
 // a random spot on flat ground 12 - 50 m from Mario
+void ents_set_focus(int on, const float *posSm)
+{
+    s_focus.on = on;
+    if (on) memcpy(s_focus.pos, posSm, 12);
+}
+
+// a spot round the player: Mario, or the car he drives away from Mario (then mostly ahead of it, where it is going)
 static int find_spot(float *out)
 {
+    const float *c = s_focus.on ? s_focus.pos : M.pos;
     for (int tries = 0; tries < 8; tries++) {
         float ang = random_float() * 2 * PI_F, dist = (12.0f + random_float() * 38.0f) / S;
-        float x = M.pos[0] + sinf(ang) * dist, z = M.pos[2] + cosf(ang) * dist;
+        float x = c[0] + sinf(ang) * dist, z = c[2] + cosf(ang) * dist;
         float fy, ny;
-        if (!s_host.floor(x, M.pos[1] + 400, z, &fy, &ny)) continue;
+        if (!s_host.floor(x, c[1] + 400, z, &fy, &ny)) continue;
         if (ny < 0.93f) continue;
-        if (fabsf(fy - M.pos[1]) > 700) continue;
+        if (fabsf(fy - c[1]) > 700) continue;
         if (s_host.blocked && s_host.blocked(x, fy + 50, z, fy)) continue;
         out[0] = x; out[1] = fy; out[2] = z;
         return 1;
@@ -2520,6 +2531,7 @@ void ents_tick(uint32_t tick, int marioId, const struct SM64MarioState *st)
         Obj *o = &s_obj[i];
         if (!o->used) continue;
         float dist2d = sqrtf(sqr(o->pos[0] - M.pos[0]) + sqr(o->pos[2] - M.pos[2]));
+        if (s_focus.on) { float df = sqrtf(sqr(o->pos[0] - s_focus.pos[0]) + sqr(o->pos[2] - s_focus.pos[2])); if (df < dist2d) dist2d = df; }
         if (dist2d > 100.0f / S && !o->ridden && !o->persist) { o->used = 0; continue; }
         if (o->bhv == B_NONE) continue;
         update_object(o);

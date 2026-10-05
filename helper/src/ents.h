@@ -58,6 +58,8 @@ int ents_star_spawn_jingle(void);
 // Mario is collecting a Power Star (falling with it, or dancing)
 int ents_star_dancing(void);
 void ents_clear(void);
+// the car the player drives away from Mario (SM64 units): pickups and enemies come and stay round it too
+void ents_set_focus(int on, const float *posSm);
 int ents_count(int enemies);
 
 #endif

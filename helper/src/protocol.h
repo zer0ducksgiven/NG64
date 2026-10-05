@@ -41,6 +41,7 @@
 #define MSG_OBJ_REQ   'y'  // u16 piece: the client has no geometry for this object piece
 #define MSG_OBJ_PIECE 'x'  // u16 piece; u8 alpha; u8 pad; u16 nv, ni; nv * ObjVert (14 bytes: s16 p[3] SM64 units; s8 n[3]; pad; u16 uv[2]); ni * u16
 #define MSG_ENT_EVENT 'v'  // u8 kind; u16 id; f32 a, b, c, d: something happened to / with them (coin, star, cap, explosion...); see ents.h
+#define MSG_DRIVE_FOCUS 'f'  // u8 valid; f32 bng pos[3]: the car the player drives, away from Mario (pickups and enemies round it too)
 #define MSG_OPTIONS   'o'  // u8 pickups, enemies (0/1); u8 song (index, 254 = music off, 255 = leave); u8 volume 0..100 (255 = leave)
 #define MSG_ENT_KILL  'c'  // u16 id; u8 kind: a car ran this enemy over (0), or a shell hit a car (1)
 #define MSG_PART_REQ  'B'  // u32 key; u8 part; u32 hash - the client has no geometry for this part/hash (lost or new)

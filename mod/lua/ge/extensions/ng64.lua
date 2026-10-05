@@ -65,8 +65,8 @@ local pendingFrames = {}      -- key -> { hist = recent poses, cur = newest }
 local goneKeys = {}           -- remote players who left: frames still in flight for them are dropped
 local remoteNames = {}
 
-local grid                    -- in-progress terrain sample job
-local gridCenter              -- vec3 of the last sent grid
+local grids = { centres = {} }   -- terrain sample jobs: [1] round Mario, [2] round the car the player drives; .centres: each last sent grid's centre
+local drive = { sentAt = 0 }      -- .pos: the car the player drives away from Mario (nil when he is Mario)
 
 local mpAccum = 0
 local hitCount, hurtCount, hullCount, carDentCount, meshBuilds = 0, 0, 0, 0, 0   -- for UAT
@@ -413,12 +413,14 @@ local function sampleHeight(x, y, refZ)
 end
 
 local gridStarts = 0
-local function startGrid(center)
+local function startGrid(center, slot)
   gridStarts = gridStarts + 1
-  grid = { cx = center.x, cy = center.y, refZ = center.z, i = 0, h = ffi.new("float[?]", GRID_N * GRID_N) }
+  grids[slot or 1] = { cx = center.x, cy = center.y, refZ = center.z, i = 0, h = ffi.new("float[?]", GRID_N * GRID_N) }
 end
 
-local function stepGrid(maxSamples)
+local function stepGrid(maxSamples, slot)
+  slot = slot or 1
+  local grid = grids[slot]
   if not grid then return end
   local total = GRID_N * GRID_N
   local half = (GRID_N - 1) * GRID_SP * 0.5
@@ -429,9 +431,10 @@ local function stepGrid(maxSamples)
   end
   grid.i = stop
   if grid.i >= total then
-    sendRaw("T" .. packF(grid.cx, grid.cy, GRID_SP) .. packU16(GRID_N) .. ffi.string(grid.h, total * 4))
-    gridCenter = vec3(grid.cx, grid.cy, grid.refZ)
-    grid = nil
+    -- the second grid (round the car) says so in a last byte
+    sendRaw("T" .. packF(grid.cx, grid.cy, GRID_SP) .. packU16(GRID_N) .. ffi.string(grid.h, total * 4) .. (slot == 2 and string.char(1) or ""))
+    grids.centres[slot] = vec3(grid.cx, grid.cy, grid.refZ)
+    grids[slot] = nil
   end
 end
 
@@ -729,22 +732,36 @@ local function updateCells(pos, budget)
   parseLeft = left
   local cs = world.CELL
   local cx, cy = math.floor(pos.x / cs), math.floor(pos.y / cs)
-  for ix = cx - CELL_RANGE, cx + CELL_RANGE do
-    for iy = cy - CELL_RANGE, cy + CELL_RANGE do
-      local key = cellId(ix, iy)
-      local c = cells[key]
-      if not c then
-        cells[key] = { ix = ix, iy = iy, z = pos.z, dirty = true }
-      elseif math.abs(c.z - pos.z) > CELL_REZ then
-        c.z, c.dirty = pos.z, true
-      elseif parsedMore and (c.pending or 0) > 0 then
-        c.dirty = true                       -- more of the shapes it needed are ready now
+  -- the cells round Mario, and round the car the player is driving (drive.pos) when that's away from him
+  local centres = { { cx, cy, pos.z } }
+  if drive.pos then centres[2] = { math.floor(drive.pos.x / cs), math.floor(drive.pos.y / cs), drive.pos.z } end
+  local seen = {}   -- a cell both are near goes by Mario's height (the first centre)
+  for _, ce in ipairs(centres) do
+    for ix = ce[1] - CELL_RANGE, ce[1] + CELL_RANGE do
+      for iy = ce[2] - CELL_RANGE, ce[2] + CELL_RANGE do
+        local key = cellId(ix, iy)
+        local c = cells[key]
+        if seen[key] then
+        elseif not c then
+          cells[key] = { ix = ix, iy = iy, z = ce[3], dirty = true }
+        elseif math.abs(c.z - ce[3]) > CELL_REZ then
+          c.z, c.dirty = ce[3], true
+        elseif parsedMore and (c.pending or 0) > 0 then
+          c.dirty = true                       -- more of the shapes it needed are ready now
+        end
+        seen[key] = true
       end
     end
   end
+  local function far(c)
+    for _, ce in ipairs(centres) do
+      if math.abs(c.ix - ce[1]) <= CELL_DROP and math.abs(c.iy - ce[2]) <= CELL_DROP then return false end
+    end
+    return true
+  end
   local todo
   for key, c in pairs(cells) do
-    if math.abs(c.ix - cx) > CELL_DROP or math.abs(c.iy - cy) > CELL_DROP then
+    if far(c) then
       sendRaw("Y" .. packU32(key))
       meshTris = meshTris - (c.tris or 0)
       cells[key] = nil
@@ -1267,9 +1284,28 @@ local function onUpdate(dtReal, dtSim, dtRaw)
 
   if lastLocalFrame then
     local pos = lastLocalFrame.pos
-    if not grid and (not gridCenter or (vec3(pos.x, pos.y, 0) - vec3(gridCenter.x, gridCenter.y, 0)):length() > GRID_REBUILD_DIST
-        or math.abs(pos.z - gridCenter.z) > 4) then
+    local gc = grids.centres[1]
+    if not grids[1] and (not gc or (vec3(pos.x, pos.y, 0) - vec3(gc.x, gc.y, 0)):length() > GRID_REBUILD_DIST
+        or math.abs(pos.z - gc.z) > 4) then
       startGrid(pos)
+    end
+    -- the player driving a car away from Mario: the SM64 world (terrain, map cells) is kept round the car as well, and
+    -- the helper spawns pickups and enemies round it, so they can be run over anywhere
+    local pv = be:getPlayerVehicle(0)
+    local fp = pv and pv:getID() ~= stubId and pv:getPosition() or nil
+    if fp and (vec3(fp.x, fp.y, 0) - vec3(pos.x, pos.y, 0)):length() < 30 then fp = nil end
+    drive.pos = fp
+    if simTime - drive.sentAt > 0.25 then
+      drive.sentAt = simTime
+      sendRaw("f" .. string.char(fp and 1 or 0) .. packF(fp and fp.x or 0, fp and fp.y or 0, fp and fp.z or 0))
+    end
+    if fp then
+      local g2 = grids.centres[2]
+      if not grids[2] and (not g2 or (vec3(fp.x, fp.y, 0) - vec3(g2.x, g2.y, 0)):length() > GRID_REBUILD_DIST
+          or math.abs(fp.z - g2.z) > 4) then
+        startGrid(fp, 2)
+      end
+      stepGrid(GRID_SAMPLES_PER_FRAME, 2)
     end
     prof("misc")
     stepGrid(GRID_SAMPLES_PER_FRAME)
@@ -1373,7 +1409,7 @@ end
 local function onClientEndMission()
   deactivate()
   for key in pairs(meshes) do deleteMesh(key) end
-  gridCenter = nil
+  grids = { centres = {} }
   meshLevel = nil
   cells, meshTris = {}, 0
   world.reset()

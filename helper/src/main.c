@@ -383,13 +383,17 @@ static void heightfield_surfaces(const float *h, int nx, int ny, float ox, float
 static struct SM64Surface *s_terrainSurf, *s_meshSurf, *s_levelSurf;
 static int s_terrainCount, s_meshCount, s_levelCount;
 
+static struct SM64Surface *s_terrainSurf2;   // the terrain round the car the player drives, away from Mario
+static int s_terrainCount2;
+
 static void reload_static(void)
 {
-    int total = s_terrainCount + s_meshCount + s_levelCount;
+    int total = s_terrainCount + s_meshCount + s_levelCount + s_terrainCount2;
     struct SM64Surface *all = malloc(sizeof(struct SM64Surface) * (total ? total : 1));
     if (s_terrainCount) memcpy(all, s_terrainSurf, sizeof(struct SM64Surface) * s_terrainCount);
     if (s_meshCount) memcpy(all + s_terrainCount, s_meshSurf, sizeof(struct SM64Surface) * s_meshCount);
     if (s_levelCount) memcpy(all + s_terrainCount + s_meshCount, s_levelSurf, sizeof(struct SM64Surface) * s_levelCount);
+    if (s_terrainCount2) memcpy(all + s_terrainCount + s_meshCount + s_levelCount, s_terrainSurf2, sizeof(struct SM64Surface) * s_terrainCount2);
     sm64_static_surfaces_load(all, total);
     free(all);
 }
@@ -497,13 +501,17 @@ static void load_terrain(const uint8_t *p, int len)
     uint16_t n;
     memcpy(&cx, p, 4); memcpy(&cy, p + 4, 4); memcpy(&sp, p + 8, 4); memcpy(&n, p + 12, 2);
     if (n < 2 || len < 14 + (int)n * n * 4) return;
+    // a trailing 1: the grid round the car the player drives, kept beside Mario's own
+    int slot = len > 14 + (int)n * n * 4 && p[14 + n * n * 4] == 1;
     float half = (n - 1) * sp * 0.5f;
     s_surfCount = 0;
     heightfield_surfaces((const float *)(p + 14), n, n, cx - half, cy - half, sp, STEP_M, 0, 0);
-    free(s_terrainSurf);
-    s_terrainSurf = malloc(sizeof(struct SM64Surface) * (s_surfCount ? s_surfCount : 1));
-    memcpy(s_terrainSurf, s_surfBuf, sizeof(struct SM64Surface) * s_surfCount);
-    s_terrainCount = s_surfCount;
+    struct SM64Surface **dst = slot ? &s_terrainSurf2 : &s_terrainSurf;
+    int *cnt = slot ? &s_terrainCount2 : &s_terrainCount;
+    free(*dst);
+    *dst = malloc(sizeof(struct SM64Surface) * (s_surfCount ? s_surfCount : 1));
+    memcpy(*dst, s_surfBuf, sizeof(struct SM64Surface) * s_surfCount);
+    *cnt = s_surfCount;
     reload_static();
 }
 
@@ -2154,6 +2162,15 @@ static void handle_packet(const uint8_t *p, int len)
         break;
     case MSG_OBJ_REQ: if (len >= 2) { uint16_t id; memcpy(&id, p, 2); send_obj_piece(id); } break;
     case MSG_TERRAIN: load_terrain(p, len); break;
+    case MSG_DRIVE_FOCUS:
+        if (len >= 13) {
+            float b[3], sp[3];
+            memcpy(b, p + 1, 12);
+            bng2sm(b, sp);
+            ents_set_focus(p[0] != 0, sp);
+            if (!p[0] && s_terrainCount2) { free(s_terrainSurf2); s_terrainSurf2 = NULL; s_terrainCount2 = 0; reload_static(); }
+        }
+        break;
     case MSG_MESH: load_mesh_chunk(p, len); break;
     case MSG_MESH_DROP: drop_mesh_cell(p, len); break;
     case MSG_SURFACES: load_level_surfaces(p, len); break;

@@ -313,7 +313,7 @@ local function checkCars(marioPos)
     if veh and veh:getID() ~= stub then
       local id = veh:getID()
       local cx, cy, cz = be:getObjectOOBBCenterXYZ(id)
-      if cx and (vec3(cx, cy, cz) - marioPos):length() < 70 then
+      if cx then   -- any car: the player may be driving far from Mario, among enemies spawned round the car
         local ctr = vec3(cx, cy, cz)
         local ax = { vec3(be:getObjectOOBBHalfAxisXYZ(id, 0)), vec3(be:getObjectOOBBHalfAxisXYZ(id, 1)), vec3(be:getObjectOOBBHalfAxisXYZ(id, 2)) }
         local vel = veh:getVelocity()
