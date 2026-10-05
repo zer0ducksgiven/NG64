@@ -93,7 +93,8 @@ try:
     s.sendto(b"o" + bytes([1, 0, 255, 255]), dst)    # pickups only
     pump(40)
     pick = [e for e in ents.values() if e["type"] < 20]
-    check(0 < len(pick) <= 12, "pickups stream in within the cap (%d)" % len(pick))
+    reds = [e for e in pick if e["type"] == 2]   # a red coin course (eight) comes on top of the streamed ones
+    check(0 < len(pick) - len(reds) <= 12 and len(reds) in (0, 8), "pickups stream in within the cap (%d, %d red course)" % (len(pick) - len(reds), len(reds)))
     check(all(e["parts"] >= 1 for e in pick), "and each is posed as pieces of its ROM model")
     far = [e for e in pick if math.hypot(e["pos"][0], e["pos"][1]) > 60]
     check(not far, "all within ~50 m of Mario")
