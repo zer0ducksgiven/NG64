@@ -1,0 +1,72 @@
+--- a/src/libsm64.c
++++ b/src/libsm64.c
+@@ -229,6 +229,7 @@
+     }
+ 
+     global_state_bind( ((struct MarioInstance *)s_mario_instance_pool.objects[ marioId ])->globalState );
++    { extern int32_t g_ng64TickMario; g_ng64TickMario = marioId; }   // NG64: whose grab offer applies
+ 
+     update_button( inputs->buttonA, A_BUTTON );
+     update_button( inputs->buttonB, B_BUTTON );
+@@ -853,3 +854,40 @@
+ {
+     play_sound( soundBits, gGlobalSoundSource );
+ }
++
++// ---- NG64: SM64 objects Mario can grab (a bob-omb) -----------------------------------------------------------------
++// interact_grabbable's last part: when the helper finds Mario punching or diving into a grabbable object, it offers it
++// here; on his next tick it is his interactObj with INPUT_INTERACT_OBJ_GRABBABLE set, so his own punch / dive code
++// (mario_check_object_grab) decides whether he faces it and picks it up, holds and throws it, as in the game. The helper
++// moves the real object; this one only stands in for it (its position is what Mario turns to).
++int32_t g_ng64TickMario;
++static struct Object s_ng64_grab[NG64_MAX_HELD];
++static int s_ng64_grabOffered[NG64_MAX_HELD];
++
++void ng64_apply_grab_offer(struct MarioState *m)
++{
++    int32_t id = g_ng64TickMario;
++    if( id < 0 || id >= NG64_MAX_HELD || !s_ng64_grabOffered[id] ) return;
++    s_ng64_grabOffered[id] = 0;
++    m->interactObj = &s_ng64_grab[id];
++    m->input |= INPUT_INTERACT_OBJ_GRABBABLE;
++}
++
++SM64_LIB_FN void sm64_ng64_offer_grab(int32_t marioId, float x, float y, float z)
++{
++    if( marioId < 0 || marioId >= NG64_MAX_HELD ) return;
++    struct Object *o = &s_ng64_grab[marioId];
++    if( !( gMarioState && ng64_bind( marioId ) && ( gMarioState->usedObj == o || gMarioState->heldObj == o ))) memset( o, 0, sizeof( *o ));
++    o->oPosX = x; o->oPosY = y; o->oPosZ = z;
++    s_ng64_grabOffered[marioId] = 1;
++}
++
++// 0: not his, 1: he is picking it up (reaching), 2: he holds it
++SM64_LIB_FN int32_t sm64_ng64_grab_status(int32_t marioId)
++{
++    if( marioId < 0 || marioId >= NG64_MAX_HELD || !ng64_bind( marioId )) return 0;
++    struct Object *o = &s_ng64_grab[marioId];
++    if( gMarioState->heldObj == o ) return 2;
++    if( gMarioState->usedObj == o && ( gMarioState->action == ACT_PICKING_UP || gMarioState->action == ACT_DIVE_PICKING_UP )) return 1;
++    return 0;
++}
+--- a/src/libsm64.h
++++ b/src/libsm64.h
+@@ -184,6 +184,8 @@
+ extern SM64_LIB_FN void sm64_mario_pick_up(int32_t marioId, bool heavy);
+ extern SM64_LIB_FN bool sm64_mario_is_holding(int32_t marioId);
+ extern SM64_LIB_FN void sm64_mario_drop_held(int32_t marioId);
++extern SM64_LIB_FN void sm64_ng64_offer_grab(int32_t marioId, float x, float y, float z);
++extern SM64_LIB_FN int32_t sm64_ng64_grab_status(int32_t marioId);
+ 
+ // NG64 additions: background music on the level sequence player
+ extern SM64_LIB_FN void sm64_ng64_music_play(uint8_t seqId);
+--- a/src/decomp/game/mario.c
++++ b/src/decomp/game/mario.c
+@@ -1716,6 +1716,7 @@
+         gMarioState->marioObj->header.gfx.node.flags &= ~GRAPH_RENDER_INVISIBLE;
+         mario_reset_bodystate(gMarioState);
+         update_mario_inputs(gMarioState);
++        { extern void ng64_apply_grab_offer(struct MarioState *m); ng64_apply_grab_offer(gMarioState); }   // NG64
+         mario_handle_special_floors(gMarioState);
+         mario_process_interactions(gMarioState);
+ 

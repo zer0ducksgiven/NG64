@@ -13,7 +13,7 @@
 enum {
     ENT_COIN_YELLOW = 1, ENT_COIN_RED, ENT_COIN_BLUE, ENT_POWER_STAR, ENT_CAP_METAL, ENT_CAP_WING, ENT_STAR_POWER,
     ENT_GOOMBA = 20, ENT_BOBOMB, ENT_KOOPA, ENT_SHELL,
-    ENT_EXPLOSION = 30, ENT_SPARKLES,
+    ENT_EXPLOSION = 30, ENT_SPARKLES, ENT_MIST, ENT_CELEB_STAR, ENT_SMOKE,
 };
 
 // events for the mod (kind, entity id, and four numbers: position bng x, y, z and a value / radius)
@@ -53,6 +53,8 @@ void ents_car_hit(int id, int kind, int haveDir, float dirX, float dirZ);
 // tests: a static object showing a model (OM_*) in a given pose; model 255 clears them all
 void ents_debug_show(int model, const float *posSm, int yaw, int animState, int animIdx, int frame);
 int ents_star_active(void);
+// Mario is collecting a Power Star (falling with it, or dancing)
+int ents_star_dancing(void);
 void ents_clear(void);
 int ents_count(int enemies);
 

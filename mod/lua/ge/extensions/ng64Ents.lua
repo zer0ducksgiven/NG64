@@ -100,11 +100,10 @@ function M.onPiece(data)
     local v = overts[i]
     -- SM64 (x, y up, z) -> BeamNG (x, -z, y), in metres
     verts[i + 1] = { x = v.p[0] * S, y = -v.p[2] * S, z = v.p[1] * S }
-    -- SM64 lights its actors from above-front with a strong ambient part, so no side goes black: BeamNG's sun would
-    -- leave the undersides dark, so the normals are tilted toward the sky (the shading stays, softened)
-    local nx, ny, nz = v.n[0] / 127 * 0.45, -v.n[2] / 127 * 0.45, v.n[1] / 127 * 0.45 + 1
-    local nl = math.sqrt(nx * nx + ny * ny + nz * nz)
-    normals[i + 1] = { x = nx / nl, y = ny / nl, z = nz / nl }
+    -- SM64 lights its actors from the camera's side, so whatever the player sees is lit; that shading is baked into the
+    -- atlas. BeamNG's sun would darken whichever side faces away from it (a koopa's shell went black), so every normal
+    -- points at the sky: the whole model takes the light the ground under it does
+    normals[i + 1] = { x = 0, y = 0, z = 1 }
     uvs[i + 1] = { u = v.uv[0] / 65535, v = v.uv[1] / 65535 }
   end
   for i = 0, ni - 1 do local k = oidx[i] faces[i + 1] = { v = k, n = k, u = k } end
@@ -203,36 +202,6 @@ function M.onEntities(data)
   end
 end
 
-local function explosionAt(x, y, z, radius)
-  local pos = vec3(x, y, z + 0.4)
-  -- particles from a pooled emitter node
-  M.fx = M.fx or { next = 1 }
-  local fx = M.fx
-  if not fx.nodes then
-    fx.nodes = {}
-    for i, emitter in ipairs({ "BNGP_31", "BNGP_32", "BNGP_31", "BNGP_32" }) do
-      local o = createObject("ParticleEmitterNode")
-      o:setPosition(vec3(0, 0, -1000))
-      o.scale = vec3(1, 1, 1)
-      o:setField("rotation", 0, "1 0 0 0")
-      o:setField("emitter", 0, emitter)
-      o:setField("dataBlock", 0, "lightExampleEmitterNodeData1")
-      o.canSave = false
-      o:registerObject("ng64_fx_" .. i .. "_" .. serial)
-      serial = serial + 1
-      scenetree.MissionGroup:addObject(o.obj)
-      fx.nodes[i] = { obj = o, until_ = 0 }
-    end
-  end
-  for i = 0, 1 do
-    local n = fx.nodes[(fx.next - 1) % #fx.nodes + 1]
-    fx.next = fx.next + 1
-    n.obj:setPosition(pos)
-    n.obj:setHidden(false)
-    n.until_ = simTime + 0.5
-  end
-end
-
 -- cars within the blast are dented and shoved away from it
 local function blastCars(x, y, z, radius)
   local c = vec3(x, y, z)
@@ -284,7 +253,6 @@ function M.onEvent(data)
     if d == 7 then M.starUntil = nil end
     api.toast(d == 5 and "The Metal Cap wore off" or d == 6 and "The Wing Cap wore off" or "Invincibility wore off")
   elseif kind == 7 then
-    explosionAt(a, b, c, d)
     blastCars(a, b, c, d + 1.0)
   elseif kind == 9 then
     opts.pickups, opts.enemies = a ~= 0, b ~= 0
@@ -425,12 +393,6 @@ function M.update(dt, marioPos)
           end
         end
       end
-    end
-  end
-
-  if M.fx and M.fx.nodes then
-    for _, n in ipairs(M.fx.nodes) do
-      if n.until_ > 0 and simTime > n.until_ then n.obj:setHidden(true) n.obj:setPosition(vec3(0, 0, -1000)) n.until_ = 0 end
     end
   end
 

@@ -1397,7 +1397,7 @@ local function getStatus()
   local f = lastLocalFrame
   return {
     connected = connected, active = active, controlled = controlled, stubId = stubId, material = materialName,
-    pos = f and { f.pos.x, f.pos.y, f.pos.z }, health = f and f.health, action = f and f.action,
+    pos = f and { f.pos.x, f.pos.y, f.pos.z }, faceAngle = f and f.faceAngle, health = f and f.health, action = f and f.action,
     numVerts = f and f.numVerts, frameAge = f and (simTime - localFrameTime), hits = hitCount, hurts = hurtCount, hulls = hullCount, carDents = carDentCount, meshBuilds = meshBuilds, poseUpdates = poseUpdates, hullPieces = hullPieces, carrying = carryingId, carries = carryCount, throws = throwCount, worldTris = meshTris, world = world.stats(), lastToast = lastToast, fires = (function() local n = 0 for _, f in pairs(fixes.fires) do n = n + #f.pts end return n end)(), profCreate = profCreate, framesStarted = framesStarted, framesCompleted = framesCompleted,
     meshes = (function() local n = 0 for _ in pairs(meshes) do n = n + 1 end return n end)(),
     hud = hud.getState(),

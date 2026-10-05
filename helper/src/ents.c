@@ -21,7 +21,7 @@ typedef uint16_t u16;
 typedef int32_t s32;
 typedef uint32_t u32;
 
-#define MAX_OBJ 64
+#define MAX_OBJ 128
 #define MAX_PICKUPS 12
 #define MAX_ENEMIES 7
 #define TICKS_PER_S 30
@@ -33,6 +33,14 @@ typedef uint32_t u32;
 // Mario
 #define ACT_FLAG_AIR          0x00000800u
 #define ACT_FLAG_SHORT_HITBOX 0x00008000u
+#define ACT_FLAG_SWIMMING     0x00002000u
+#define ACT_FLAG_THROWING     0x80000000u
+#define ACT_DIVE              0x0188088Au
+#define ACT_DIVE_SLIDE        0x00880456u
+#define ACT_FLAG_METAL_WATER  0x00004000u
+#define ACT_STAR_DANCE_WATER  0x00001303u
+#define ACT_FALL_AFTER_STAR_GRAB 0x00001904u
+#define ACT_STAR_DANCE_NO_EXIT 0x00001307u
 #define ACT_FLAG_RIDING_SHELL 0x00010000u
 #define ACT_FLAG_INVULNERABLE 0x00020000u
 #define ACT_FLAG_ATTACKING    0x00800000u
@@ -164,7 +172,8 @@ typedef uint32_t u32;
 #define SOUND_AIR_BOBOMB_LIT_FUSE  SND_ARG(6, 0, 0x08, 0x60, 0)
 #define SOUND_GENERAL2_BOBOMB_EXPLOSION SND_ARG(8, 0, 0x2E, 0x20, 8)
 
-enum { B_NONE, B_COIN, B_STAR, B_CAP, B_STAR_POWER, B_GOOMBA, B_BOBOMB, B_KOOPA, B_SHELL, B_EXPLOSION, B_SPAWNED_COIN };
+enum { B_NONE, B_COIN, B_STAR, B_CAP, B_STAR_POWER, B_GOOMBA, B_BOBOMB, B_KOOPA, B_SHELL, B_EXPLOSION, B_SPAWNED_COIN,
+       B_MIST, B_SPARKLE, B_CELEB_STAR, B_SMOKE };
 enum { L_LEVEL, L_PUSHABLE, L_DESTRUCTIVE, L_GENACTOR };
 
 // ---- math (SM64's angles are s16, 0x10000 to a turn, 0 = +z, sin for x) -------------------------------------------
@@ -258,8 +267,12 @@ typedef struct Obj {
     int koopaType; float koopaAgility; s16 koopaTargetYaw; int koopaCountdown, koopaTurning, koopaTimeUntilTurn;
     float koopaDist; s16 koopaAngle;
     int fuseLit, fuseTimer;
+    int heldState;           // HELD_FREE, HELD_HELD (Mario carries it), HELD_THROWN, HELD_DROPPED
+    int smokeTimer;
     int capF4, capF8;
     float coinBaseVelY;
+    float puffScale; int opacity, opacityStep, puffGrow;
+    int celebDiameter;
     int sub;
     int ridden;
     float sndPos[3];     // where its sounds come from, relative to Mario (the audio keeps the pointer)
@@ -272,6 +285,9 @@ static uint16_t s_nextId = 1;
 static u32 s_nextPickupSpawn, s_nextEnemySpawn;
 static int s_starTicks;        // the invincibility star
 static int s_prevCapFlags;
+static uint16_t s_grabOffered;   // the grabbable object last offered to Mario (interact_grabbable)
+static uint16_t s_heldId;        // the one he holds
+enum { HELD_FREE, HELD_HELD, HELD_THROWN, HELD_DROPPED };
 
 // Mario, as the objects see him
 static struct {
@@ -877,7 +893,101 @@ static Obj *spawn_coin_burst(const float *pos, int blue, float baseVelY)
     return c;
 }
 
-static void spawn_mist(Obj *o) { (void)o; }   // the little white puff when something dies: not drawn yet
+// ---- particles -------------------------------------------------------------------------------------------------------
+// spawn_mist_particles_variable / cur_obj_spawn_particles with sMistParticles: white puffs (MODEL_MIST,
+// bhvWhitePuffExplosion) flung out round a point. count 0 means 20, up to 20 means 4.
+static void spawn_mist_particles_at(const float *pos, int count, float offsetY, float size)
+{
+    float sizeBase = size, sizeRange = size / 20.0f;
+    int n = count == 0 ? 20 : count > 20 ? count : 4;
+    for (int i = 0; i < n; i++) {
+        float sc = random_float() * (sizeRange * 0.1f) + sizeBase * 0.1f;
+        Obj *p = obj_alloc(B_MIST, ENT_MIST, OM_MIST, L_LEVEL);
+        if (!p) return;
+        memcpy(p->pos, pos, 12);
+        p->pos[1] += offsetY;
+        p->sub = 2;                         // oBhvParams2ndByte
+        p->moveYaw = (s16)random_u16();
+        p->gravity = -4.0f;                 // 252 as the s8 it is
+        p->drag = 30.0f;
+        p->fwd = random_float() * 5.0f + 40.0f;
+        p->vel[1] = random_float() * 20.0f + 30.0f;
+        p->scale[0] = p->scale[1] = p->scale[2] = sc;
+        p->billboard = 1;
+        become_intangible(p);
+    }
+}
+
+static void spawn_mist(Obj *o) { spawn_mist_particles_at(o->pos, 0, 0, 46.0f); }   // spawn_mist_particles
+
+static void bhv_white_puff_exploding_loop(Obj *o)
+{
+    if (o->timer == 0) {
+        cur_obj_compute_vel_xz(o);
+        o->puffScale = o->scale[0];
+        if (o->sub == 2) { o->opacity = 254; o->opacityStep = -21; o->puffGrow = 0; }
+        else if (o->sub == 3) { o->opacity = 254; o->opacityStep = -13; o->puffGrow = 1; }
+    }
+    // cur_obj_move_using_vel_and_gravity, cur_obj_apply_drag_xz
+    o->pos[0] += o->vel[0]; o->pos[2] += o->vel[2];
+    o->vel[1] += o->gravity; o->pos[1] += o->vel[1];
+    apply_drag_to_value(&o->vel[0], o->drag);
+    apply_drag_to_value(&o->vel[2], o->drag);
+    if (o->vel[1] > 100.0f) o->vel[1] = 100.0f;
+    if (o->timer > 20) { obj_delete(o); return; }
+    if (o->opacity) {
+        o->opacity += o->opacityStep;
+        if (o->opacity < 2) { obj_delete(o); return; }
+        // the puff fades as it shrinks; BeamNG's cut-out material can't fade, so the shrinking carries it
+        float sc = o->puffGrow ? o->puffScale * ((254 - o->opacity) / 254.0f) : o->puffScale * (o->opacity / 254.0f);
+        o->scale[0] = o->scale[1] = o->scale[2] = sc;
+    }
+}
+
+// a star's celebration (bhvCelebrationStar): it rises spinning round Mario as he dances, then faces the camera, grows
+// back and goes; sparkles (bhvCelebrationStarSparkle) drop from it as it rises
+static void spawn_celebration_star(void)
+{
+    Obj *o = obj_alloc(B_CELEB_STAR, ENT_CELEB_STAR, OM_STAR, L_LEVEL);
+    if (!o) return;
+    o->home[0] = M.pos[0]; o->home[2] = M.pos[2];
+    o->pos[0] = M.pos[0]; o->pos[1] = M.pos[1] + 30.0f; o->pos[2] = M.pos[2];
+    o->moveYaw = (s16)(M.faceYaw + 0x8000);
+    o->celebDiameter = 100;
+    o->scale[0] = o->scale[1] = o->scale[2] = 0.4f;
+    become_intangible(o);
+}
+
+static void bhv_celebration_star_loop(Obj *o)
+{
+    if (o->action == 0) {   // CELEB_STAR_ACT_SPIN_AROUND_MARIO
+        o->pos[0] = o->home[0] + sins(o->moveYaw) * (float)(o->celebDiameter / 2);
+        o->pos[2] = o->home[2] + coss(o->moveYaw) * (float)(o->celebDiameter / 2);
+        o->pos[1] += 5.0f;
+        o->faceYaw += 0x1000;
+        o->moveYaw += 0x2000;
+        if (o->timer == 40) o->action = 1;
+        if (o->timer < 35) {
+            Obj *sp = obj_alloc(B_SPARKLE, ENT_SPARKLES, OM_SPARKLES, L_LEVEL);
+            if (sp) { memcpy(sp->pos, o->pos, 12); sp->graphYOffset = 25; sp->animState = -1; sp->billboard = 1; become_intangible(sp); }
+            o->celebDiameter++;
+        } else o->celebDiameter -= 20;
+    } else {                // CELEB_STAR_ACT_FACE_CAMERA
+        if (o->timer < 10) {
+            float sc = (float)o->timer / 10.0f;
+            o->scale[0] = o->scale[1] = o->scale[2] = sc;
+            o->faceYaw += 0x1000;
+        } else o->faceYaw = M.faceYaw;
+        if (o->timer == 59) obj_delete(o);
+    }
+}
+
+static void bhv_celebration_star_sparkle_loop(Obj *o)
+{
+    o->animState++;          // the script's ADD_INT(oAnimState, 1): the sparkle geo's frames
+    o->pos[1] -= 15.0f;
+    if (o->timer == 12) obj_delete(o);
+}
 
 static void obj_spawn_loot_yellow_coins(Obj *o, int n, float baseVelY)
 {
@@ -983,8 +1093,16 @@ static void interact_star(Obj *o)
     o->interactStatus = INT_STATUS_INTERACTED;
     play_sound(SOUND_MENU_STAR_SOUND);
     s_host.lock(); sm64_mario_heal(M.id, 31); s_host.unlock();
-    if (o->bhv == B_STAR_POWER) { s_starTicks = 20 * TICKS_PER_S; emit(EV_STAR_POWER, o->id, o->pos, 20); }
-    else emit(EV_POWER_STAR, o->id, o->pos, 1);
+    if (o->bhv == B_STAR_POWER) { s_starTicks = 20 * TICKS_PER_S; emit(EV_STAR_POWER, o->id, o->pos, 20); return; }
+    // a Power Star: interact_star_or_key as for a star that doesn't leave the level (a 100-coin star's): the puff where
+    // it was, and Mario's star dance (in water, or falling to the ground first if he caught it in the air); the dance
+    // brings the celebration star and the jingle (ents_tick, main.c)
+    spawn_mist_particles_at(o->pos, 0, 10, 30.0f);   // bhvStarKeyCollectionPuffSpawner
+    u32 grab = ACT_STAR_DANCE_NO_EXIT;
+    if (M.action & (ACT_FLAG_SWIMMING | ACT_FLAG_METAL_WATER)) grab = ACT_STAR_DANCE_WATER;
+    if (M.action & ACT_FLAG_AIR) grab = ACT_FALL_AFTER_STAR_GRAB;
+    s_host.lock(); sm64_set_mario_action_arg(M.id, grab, 1); s_host.unlock();
+    emit(EV_POWER_STAR, o->id, o->pos, 1);
 }
 
 static void interact_cap(Obj *o)
@@ -1017,6 +1135,15 @@ static void interact_grabbable(Obj *o)
             s_host.lock();
             sm64_mario_attack(M.id, o->pos[0], o->pos[1], o->pos[2], o->hbHeight);   // bounce back, as bounce_back_from_attack
             s_host.unlock();
+            return;
+        }
+    }
+    // able_to_grab_object: a punch (its first part: Mario's own grab check only runs then) or a dive. Mario's code then
+    // decides, on his next tick, whether he faces it and picks it up (libsm64 patch: sm64_ng64_offer_grab)
+    if (M.action == ACT_PUNCHING || M.action == ACT_MOVE_PUNCHING || M.action == ACT_DIVE || M.action == ACT_DIVE_SLIDE) {
+        if (!s_heldId) {
+            s_host.lock(); sm64_ng64_offer_grab(M.id, o->pos[0], o->pos[1], o->pos[2]); s_host.unlock();
+            s_grabOffered = o->id;
         }
     }
 }
@@ -1490,6 +1617,125 @@ static void bobomb_free_loop(Obj *o)
     if (o->fuseTimer > 150) o->action = 3;
 }
 
+// where Mario holds a light object: in front of his chest (the game's HOLP, the hand's position as drawn)
+static void mario_holp(float *out)
+{
+    out[0] = M.pos[0] + sins(M.faceYaw) * 50.0f;
+    out[1] = M.pos[1] + 45.0f;
+    out[2] = M.pos[2] + coss(M.faceYaw) * 50.0f;
+}
+
+// INT_STATUS_MARIO_DROP_OBJECT: Mario's hold actions answer it with drop_and_set_mario_action - to standing or walking
+// on the ground, falling in the air
+static void mario_drop_object_status(void)
+{
+    u32 next = (M.action & ACT_FLAG_AIR) ? 0x0100088Cu /* ACT_FREEFALL */ : M.fwd > 0 ? 0x04000440u /* ACT_WALKING */ : 0x0C400201u /* ACT_IDLE */;
+    s_host.lock(); sm64_mario_drop_held(M.id); sm64_set_mario_action(M.id, next); s_host.unlock();
+}
+
+static void bobomb_held_loop(Obj *o)
+{
+    anim_init(o, 1);
+    mario_holp(o->pos);     // drawn in his hands (the game hides it and draws it at the HOLP)
+    o->moveYaw = M.faceYaw;
+    o->fuseLit = 1;
+    if (o->fuseTimer > 150) {
+        // the game sets INT_STATUS_MARIO_DROP_OBJECT: he drops it, and it goes off
+        mario_drop_object_status();
+        o->action = BOBOMB_ACT_EXPLODE;
+    }
+}
+
+// cur_obj_move_after_thrown_or_dropped
+static void obj_move_after_thrown_or_dropped(Obj *o, float fwd, float velY)
+{
+    o->moveFlags = 0;
+    o->floorH = find_floor(o->pos[0], o->pos[1] + 160.0f, o->pos[2], &o->floor);
+    if (o->floorH > o->pos[1]) o->pos[1] = o->floorH;
+    else if (o->floorH < -10000.0f) { memcpy(o->pos, M.pos, 12); o->floorH = find_floor(o->pos[0], o->pos[1] + 160.0f, o->pos[2], &o->floor); }
+    o->fwd = fwd; o->vel[1] = velY;
+    if (o->fwd != 0) cur_obj_move_y(o, o->gravity, -0.4f, o->buoyancy);
+}
+
+static void bobomb_dropped_loop(Obj *o)
+{
+    become_tangible(o);                 // cur_obj_get_dropped
+    o->heldState = HELD_FREE;
+    obj_move_after_thrown_or_dropped(o, 0, 0);
+    anim_init(o, 0);
+    o->action = BOBOMB_ACT_PATROL;
+}
+
+static void bobomb_thrown_loop(Obj *o)
+{
+    become_tangible(o);
+    o->heldState = HELD_FREE;
+    o->fwd = 25.0f;
+    o->vel[1] = 20.0f;
+    o->action = BOBOMB_ACT_LAUNCHED;
+}
+
+// Mario's side of holding: picked up (mario_grab_used_object), and let go - thrown (mario_throw_held_object) or put
+// down (mario_drop_held_object), from where he held it
+static void update_held_object(void)
+{
+    s_host.lock(); int st = sm64_ng64_grab_status(M.id); s_host.unlock();
+    if (st == 2 && !s_heldId && s_grabOffered) {
+        for (int i = 0; i < MAX_OBJ; i++)
+            if (s_obj[i].used && s_obj[i].id == s_grabOffered) {
+                s_obj[i].heldState = HELD_HELD; become_intangible(&s_obj[i]); s_heldId = s_grabOffered;
+                break;
+            }
+        s_grabOffered = 0;
+    }
+    if (st == 0 && !s_heldId) s_grabOffered = 0;
+    if (!s_heldId) return;
+    Obj *o = NULL;
+    for (int i = 0; i < MAX_OBJ; i++) if (s_obj[i].used && s_obj[i].id == s_heldId) o = &s_obj[i];
+    if (!o) {   // it went off in his hands
+        if (st == 2) { s_host.lock(); sm64_mario_drop_held(M.id); s_host.unlock(); }
+        s_heldId = 0;
+        return;
+    }
+    if (st == 2) return;
+    float holp[3];
+    mario_holp(holp);
+    if (M.action & ACT_FLAG_THROWING) {
+        o->pos[0] = holp[0] + 32.0f * sins(M.faceYaw); o->pos[1] = holp[1]; o->pos[2] = holp[2] + 32.0f * coss(M.faceYaw);
+        o->heldState = HELD_THROWN;
+    } else {
+        o->pos[0] = holp[0]; o->pos[1] = M.pos[1]; o->pos[2] = holp[2];   // (dropped at Mario's height, as the game does)
+        o->heldState = HELD_DROPPED;
+    }
+    o->moveYaw = M.faceYaw;
+    s_heldId = 0;
+}
+
+// the fuse's smoke (bhvBobombFuseSmoke, bhv_dust_smoke_loop)
+static void spawn_fuse_smoke(Obj *o)
+{
+    Obj *sm = obj_alloc(B_SMOKE, ENT_SMOKE, OM_SMOKE, L_LEVEL);
+    if (!sm) return;
+    memcpy(sm->pos, o->pos, 12);
+    sm->pos[0] += (int)(random_float() * 80.0f) - 40;
+    sm->pos[1] += (int)(random_float() * 80.0f) + 60;
+    sm->pos[2] += (int)(random_float() * 80.0f) - 40;
+    sm->scale[0] = sm->scale[1] = sm->scale[2] = 1.2f;
+    sm->animState = -1;
+    sm->billboard = 1;
+    sm->invisible = 1;    // DELAY(1): its loop (and its drawing) starts the tick after
+    become_intangible(sm);
+}
+
+static void bhv_dust_smoke_loop(Obj *o)
+{
+    o->invisible = 0;
+    o->pos[0] += o->vel[0]; o->pos[1] += o->vel[1]; o->pos[2] += o->vel[2];
+    if (o->smokeTimer == 10) { obj_delete(o); return; }
+    o->smokeTimer++;
+    o->animState++;       // the script's ADD_INT(oAnimState, 1): the smoke's frames
+}
+
 static void bobomb_random_blink(Obj *o)
 {
     if (o->blinkTimer == 0) {
@@ -1505,11 +1751,18 @@ static void bobomb_random_blink(Obj *o)
 static void bhv_bobomb_loop(Obj *o)
 {
     if (is_point_within_radius_of_mario(o->pos[0], o->pos[1], o->pos[2], 4000)) {
-        bobomb_free_loop(o);       // (a held bob-omb isn't done: only the free loop)
+        switch (o->heldState) {
+        case HELD_FREE: bobomb_free_loop(o); break;
+        case HELD_HELD: bobomb_held_loop(o); break;
+        case HELD_THROWN: bobomb_thrown_loop(o); break;
+        case HELD_DROPPED: bobomb_dropped_loop(o); break;
+        }
         if (!o->used) return;
         bobomb_random_blink(o);
         if (o->fuseLit == 1) {
-            if (!(o->fuseTimer & 7)) obj_sound(o, SOUND_AIR_BOBOMB_LIT_FUSE);   // (the fuse smoke is not drawn yet)
+            int period = o->fuseTimer > 120 ? 1 : 7;
+            if (!(period & o->fuseTimer)) spawn_fuse_smoke(o);
+            if (!(o->fuseTimer & 7)) obj_sound(o, SOUND_AIR_BOBOMB_LIT_FUSE);
             o->fuseTimer++;
         }
     }
@@ -1787,7 +2040,21 @@ static void bhv_koopa_shell_loop(Obj *o)
 // ---- explosion ----------------------------------------------------------------------------------------------------------------------------
 static void bhv_explosion_loop(Obj *o)
 {
-    if (o->timer == 9) { obj_delete(o); return; }
+    if (o->timer == 9) {
+        // under water the game lets out bubbles; on land, a big puff of smoke (bhvBobombBullyDeathSmoke) below it
+        if (find_water_level(o->pos[0], o->pos[2]) <= o->pos[1]) {
+            Obj *sm = obj_alloc(B_SMOKE, ENT_SMOKE, OM_SMOKE, L_LEVEL);
+            if (sm) {
+                memcpy(sm->pos, o->pos, 12);
+                sm->pos[1] -= 300.0f;
+                sm->scale[0] = sm->scale[1] = sm->scale[2] = 10.0f;
+                sm->animState = -1; sm->billboard = 1; sm->invisible = 1;
+                become_intangible(sm);
+            }
+        }
+        obj_delete(o);
+        return;
+    }
     float s = (float)o->timer / 9.0f + 1.0f;
     o->scale[0] = o->scale[1] = o->scale[2] = s;
     o->animState++;
@@ -1813,6 +2080,7 @@ void ents_set_options(int pickups, int enemies)
 
 void ents_get_options(int *pickups, int *enemies) { *pickups = s_pickupsOn; *enemies = s_enemiesOn; }
 int ents_star_active(void) { return s_starTicks > 0; }
+int ents_star_dancing(void) { return M.action == ACT_STAR_DANCE_NO_EXIT || M.action == ACT_STAR_DANCE_WATER || M.action == ACT_FALL_AFTER_STAR_GRAB; }
 void ents_clear(void) { memset(s_obj, 0, sizeof(s_obj)); s_starTicks = 0; }
 
 int ents_count(int enemies)
@@ -1858,14 +2126,18 @@ static int find_spot(float *out)
 
 static void set_home(Obj *o) { memcpy(o->home, o->pos, 12); }
 
+static int s_testType;       // tests: spawn this pickup at s_testPos instead of a random one somewhere
+static float s_testPos[3];
+
 static void spawn_pickup(void)
 {
     static const int types[] = { ENT_COIN_YELLOW, ENT_COIN_RED, ENT_COIN_BLUE, ENT_POWER_STAR, ENT_CAP_METAL, ENT_CAP_WING, ENT_STAR_POWER };
     static const int weights[] = { 55, 8, 4, 4, 8, 8, 5 };
-    int type = pick_weighted(types, weights, 7);
-    if (type >= ENT_POWER_STAR && count_ent(type) >= 1) return;
+    int type = s_testType ? s_testType : pick_weighted(types, weights, 7);
+    if (!s_testType && type >= ENT_POWER_STAR && count_ent(type) >= 1) return;
     float p[3];
-    int ok = find_spot(p);
+    int ok = 1;
+    if (s_testType) memcpy(p, s_testPos, 12); else ok = find_spot(p);
     if (!ok) return;
     Obj *o = NULL;
     switch (type) {
@@ -1903,9 +2175,10 @@ static void spawn_enemy(void)
 {
     static const int types[] = { ENT_GOOMBA, ENT_BOBOMB, ENT_KOOPA };
     static const int weights[] = { 60, 28, 12 };
-    int type = pick_weighted(types, weights, 3);
+    int type = s_testType ? s_testType : pick_weighted(types, weights, 3);
     float p[3];
-    if (!find_spot(p)) return;
+    if (s_testType) memcpy(p, s_testPos, 12);
+    else if (!find_spot(p)) return;
     Obj *o = NULL;
     switch (type) {
     case ENT_GOOMBA:
@@ -1936,6 +2209,7 @@ static void spawn_enemy(void)
 void ents_debug_show(int model, const float *posSm, int yaw, int animState, int animIdx, int frame)
 {
     if (model == 255) { for (int i = 0; i < MAX_OBJ; i++) if (s_obj[i].used && s_obj[i].bhv == B_NONE) s_obj[i].used = 0; return; }
+    if (model >= 200) { s_testType = model - 200; memcpy(s_testPos, posSm, 12); if (s_testType >= ENT_GOOMBA) spawn_enemy(); else spawn_pickup(); s_testType = 0; return; }   // a real one
     if (model < 0 || model >= OM_COUNT) return;
     Obj *o = obj_alloc(B_NONE, ENT_EXPLOSION + 5, model, L_LEVEL);
     if (!o) return;
@@ -1986,6 +2260,10 @@ static void update_object(Obj *o)
     case B_KOOPA: bhv_koopa_update(o); break;
     case B_SHELL: bhv_koopa_shell_loop(o); break;
     case B_EXPLOSION: bhv_explosion_loop(o); break;
+    case B_MIST: bhv_white_puff_exploding_loop(o); break;
+    case B_SPARKLE: bhv_celebration_star_sparkle_loop(o); break;
+    case B_CELEB_STAR: bhv_celebration_star_loop(o); break;
+    case B_SMOKE: bhv_dust_smoke_loop(o); break;
     }
     if (!o->used) return;
 
@@ -2014,6 +2292,11 @@ void ents_tick(uint32_t tick, int marioId, const struct SM64MarioState *st)
     if ((s_prevCapFlags & MARIO_METAL_CAP) && !(capFlags & MARIO_METAL_CAP)) emit(EV_POWER_END, 0, NULL, EV_CAP_METAL);
     if ((s_prevCapFlags & MARIO_WING_CAP) && !(capFlags & MARIO_WING_CAP)) emit(EV_POWER_END, 0, NULL, EV_CAP_WING);
     s_prevCapFlags = capFlags;
+
+    // a star dance has begun: general_star_dance_handler's first frame spawns the celebration star
+    if ((M.action == ACT_STAR_DANCE_NO_EXIT || M.action == ACT_STAR_DANCE_WATER) && M.prevAction != M.action) spawn_celebration_star();
+
+    update_held_object();
 
     // Mario touches things (SM64: detect_object_collisions, then Mario's own update), then they all update
     detect_collisions_and_interact();

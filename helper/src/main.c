@@ -1280,7 +1280,7 @@ static void ent_tick_local(Mario *m)
     extern uint32_t s_tick;
     ents_tick(s_tick, m->id, &m->state);
     static int lastN;
-    static uint8_t buf[8000];
+    static uint8_t buf[16000];
     buf[0] = MSG_ENTITIES;
     int len = ents_pack(buf + 1, sizeof(buf) - 1);
     uint16_t n;
@@ -1310,7 +1310,14 @@ static int music_override(void)
 {
     Mario *m = mario_find(0);
     if (!m) return 0;
-    if (m->state.flags & MARIO_METAL_CAP) return 0x0F;                       // Metallic Mario
+    // a Power Star: the collect jingle (SEQ_EVENT_CUTSCENE_COLLECT_STAR) from the dance's start, for its length; then
+    // whatever was playing before comes back
+    static int jingleTicks, wasDancing;
+    int dancing = ents_star_dancing();
+    if (dancing && !wasDancing) jingleTicks = 5 * 30;
+    wasDancing = dancing;
+    if (jingleTicks > 0) { jingleTicks--; return 0x01; }
+    if (m->state.flags & MARIO_METAL_CAP) return 0x0F;                     // Metallic Mario
     if (m->state.flags & (MARIO_WING_CAP | MARIO_VANISH_CAP)) return 0x0E;   // Powerful Mario
     if (ents_star_active()) return 0x14;                                     // Race Fanfare
     return 0;

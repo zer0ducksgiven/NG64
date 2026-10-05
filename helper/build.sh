@@ -23,6 +23,8 @@ grep -q 'sm64_mario_burn' src/libsm64.c || patch -p1 -s < '$HERE/patches/libsm64
 grep -q 'sm64_ng64_play_sound' src/libsm64.c || patch -p1 -s < '$HERE/patches/libsm64-sound.patch'
 grep -q 'g_ng64PartCount' src/gfx_adapter.c || patch -p1 -s < '$HERE/patches/libsm64-parts.patch'
 grep -q 'read from the player' Makefile || patch -p1 -s < '$HERE/patches/libsm64-rommodel.patch'
+grep -q 'NG64: the game.s handler without the level exit' src/decomp/game/mario_actions_cutscene.c || patch -p1 -s < '$HERE/patches/libsm64-stardance.patch'
+grep -q 'sm64_ng64_offer_grab' src/libsm64.c || patch -p1 -s < '$HERE/patches/libsm64-grab.patch'
 # anything ever downloaded from the decomp goes, sources and objects, so it can't end up in the helper
 rm -f src/decomp/mario/*.inc.c src/decomp/mario/*.inc.h build/src/decomp/mario/*.o build/src/decomp/mario/*.d
 make lib CC=gcc -j8 >/dev/null

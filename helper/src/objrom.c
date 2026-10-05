@@ -24,6 +24,7 @@ static const struct { int seg; uint32_t rom, size; } k_raws[] = {   // geo layou
     { 0x0D, 0x1D7C90, 1664 },   // group 14 geo
     { 0x0F, 0x2008D0, 2880 },   // common0 geo
     { 0x16, 0x218DA0, 4192 },   // common1 geo
+    { 0x17, 0x1279B0, 11824 },  // group0 geo (Mario's bank: sparkles)
 };
 static const struct { int model; uint32_t geo; } k_models[OM_COUNT] = {
     [OM_COIN_YELLOW] = { OM_COIN_YELLOW, 0x1600013C }, [OM_COIN_RED] = { OM_COIN_RED, 0x160002C4 },
@@ -33,6 +34,8 @@ static const struct { int model; uint32_t geo; } k_models[OM_COUNT] = {
     [OM_GOOMBA] = { OM_GOOMBA, 0x0F0006E4 }, [OM_BOBOMB] = { OM_BOBOMB, 0x0F0007B8 },
     [OM_KOOPA] = { OM_KOOPA, 0x0D000214 }, [OM_KOOPA_SHELL] = { OM_KOOPA_SHELL, 0x0F000AB0 },
     [OM_EXPLOSION] = { OM_EXPLOSION, 0x16000040 }, [OM_KOOPA_NOSHELL] = { OM_KOOPA_NOSHELL, 0x0D0000D0 },
+    [OM_SPARKLES] = { OM_SPARKLES, 0x170001BC }, [OM_MIST] = { OM_MIST, 0x16000000 },
+    [OM_SMOKE] = { OM_SMOKE, 0x17000038 },
 };
 
 static const uint8_t *s_rom;
@@ -158,12 +161,62 @@ static int decode_texture(uint32_t addr, int fmt, int siz, int w, int h, uint8_t
     return 1;
 }
 
-// a texture, tinted by a colour (lit surfaces take their light's colour), in the atlas; with 1 px of replicated border
-static int s_texGain = 100;   // percent: an environment map is brightened, SM64's reflections being brighter than their texture
-static Rect *atlas_texture(uint32_t addr, int fmt, int siz, int w, int h, const uint8_t tint[3], int opaque)
+// The RDP colour combiner, one cycle: colour = (a - b) * c + d and alpha likewise, from the inputs G_SETCOMBINE names.
+// Everything an object's texels go through is evaluated here per texel, with the shade (the triangle's light level, or
+// its vertex colour) and the primitive / environment colours fixed per triangle, and the result baked into the atlas.
+typedef struct { uint8_t a, b, c, d, aa, ab, ac, ad; } Combine;
+typedef struct { uint8_t shade[4], prim[4], env[4]; } CombIn;
+
+static float comb_in(int slot, int code, int k, const float *tex, const CombIn *in)
 {
-    uint64_t key = (uint64_t)addr << 30 ^ ((uint64_t)fmt << 27) ^ ((uint64_t)siz << 25) ^ ((uint64_t)w << 17) ^ ((uint64_t)h << 9)
-                 ^ ((uint64_t)tint[0] << 40) ^ ((uint64_t)tint[1] << 48) ^ ((uint64_t)tint[2] << 56) ^ (opaque ? 1 : 0) ^ ((uint64_t)s_texGain << 20);
+    // k 0..2: a colour channel, 3: alpha
+    float t = tex[k], ta = tex[3];
+    float sh = in->shade[k] / 255.0f, pr = in->prim[k] / 255.0f, en = in->env[k] / 255.0f;
+    if (k < 3) {
+        if (slot == 2) {   // c
+            switch (code) {
+            case 1: return t; case 3: return pr; case 4: return sh; case 5: return en;
+            case 8: return ta; case 10: return in->prim[3] / 255.0f; case 11: return in->shade[3] / 255.0f;
+            case 12: return in->env[3] / 255.0f; case 14: return 1; default: return 0;
+            }
+        }
+        switch (code) {   // a, b, d
+        case 1: return t; case 3: return pr; case 4: return sh; case 5: return en;
+        case 6: return slot == 1 ? 0 : 1;   // a / d: ONE (b's 6 is CENTER, 0 here)
+        default: return 0;
+        }
+    }
+    switch (code) {   // alpha inputs: a, b, d share the list; c too, with 0 = LOD and 6 = PRIM_LOD
+    case 1: return ta; case 3: return pr; case 4: return sh; case 5: return en;
+    case 6: return 1;   // ONE (c: PRIM_LOD_FRAC, taken as 1)
+    default: return 0;  // COMBINED (one cycle: nothing yet), LOD, 0
+    }
+}
+
+static void combine_texel(const Combine *cb, const CombIn *in, const uint8_t *texel, uint8_t *out)
+{
+    float tex[4] = { texel[0] / 255.0f, texel[1] / 255.0f, texel[2] / 255.0f, texel[3] / 255.0f };
+    for (int k = 0; k < 4; k++) {
+        int a = k < 3 ? cb->a : cb->aa, b = k < 3 ? cb->b : cb->ab, c = k < 3 ? cb->c : cb->ac, d = k < 3 ? cb->d : cb->ad;
+        float v = (comb_in(0, a, k, tex, in) - comb_in(1, b, k, tex, in)) * comb_in(2, c, k, tex, in) + comb_in(3, d, k, tex, in);
+        v = v < 0 ? 0 : v > 1 ? 1 : v;
+        out[k] = (uint8_t)(v * 255.0f + 0.5f);
+    }
+}
+
+static uint64_t fnv64(uint64_t h, const void *p, size_t n)
+{
+    const uint8_t *b = p;
+    for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
+    return h;
+}
+
+// a texture put through the combiner, in the atlas, with TEX_MARGIN texels of replicated border
+static Rect *atlas_texture(uint32_t addr, int fmt, int siz, int w, int h, const Combine *cb, const CombIn *in, int opaque)
+{
+    uint64_t key = 0xCBF29CE484222325ull;
+    int hdr[5] = { (int)addr, fmt, siz, w, h };
+    key = fnv64(key, hdr, sizeof(hdr)); key = fnv64(key, cb, sizeof(*cb)); key = fnv64(key, in, sizeof(*in)); key = fnv64(key, &opaque, sizeof(opaque));
     key &= ~(1ull << 62);
     Rect *e = rect_find(key);
     if (e) return e;
@@ -172,9 +225,9 @@ static Rect *atlas_texture(uint32_t addr, int fmt, int siz, int w, int h, const 
     uint8_t *px = malloc((size_t)w * h * 4);
     if (!decode_texture(addr, fmt, siz, w, h, px)) { free(px); return NULL; }
     for (int i = 0; i < w * h; i++) {
-        { int v = px[i * 4] * tint[0] / 255 * s_texGain / 100; px[i * 4] = (uint8_t)(v > 255 ? 255 : v); }
-        { int v = px[i * 4 + 1] * tint[1] / 255 * s_texGain / 100; px[i * 4 + 1] = (uint8_t)(v > 255 ? 255 : v); }
-        { int v = px[i * 4 + 2] * tint[2] / 255 * s_texGain / 100; px[i * 4 + 2] = (uint8_t)(v > 255 ? 255 : v); }
+        uint8_t o[4];
+        combine_texel(cb, in, px + i * 4, o);
+        memcpy(px + i * 4, o, 4);
         if (opaque) px[i * 4 + 3] = 255;
     }
     atlas_put(x, y, w, h, px, TEX_MARGIN);
@@ -200,7 +253,8 @@ typedef struct {
     uint32_t geom;
     uint8_t diffuse[3], ambient[3];
     int8_t lightDir[3];
-    int shadeUsed;      // the colour combiner (G_SETCOMBINE) includes the shade colour: lights or vertex colours tint the texture
+    Combine comb;       // G_SETCOMBINE, cycle 1
+    uint8_t prim[4], env[4];
     SVtx vtx[16];
     ObjPiece *piece;
     int opaque;
@@ -266,7 +320,6 @@ static void emit_tri(GfxState *g, int a, int b, int c)
     SVtx *vs[3] = { &g->vtx[a], &g->vtx[b], &g->vtx[c] };
     Rect *rc;
     float st[3][2] = { { 0 } };
-    uint8_t white[3] = { 255, 255, 255 };
     int textured = g->texOn && g->loaded;
     // lit surfaces: SM64's shade (ambient + diffuse * N.L) is baked into the texture, one flat level per triangle: BeamNG's
     // sun would leave whichever side faces away from it black, and has no ambient to soften that
@@ -274,29 +327,42 @@ static void emit_tri(GfxState *g, int a, int b, int c)
     if (lit) {
         float nx = 0, ny = 0, nz = 0;
         for (int i = 0; i < 3; i++) { nx += (int8_t)vs[i]->c[0]; ny += (int8_t)vs[i]->c[1]; nz += (int8_t)vs[i]->c[2]; }
+        // F3D takes a light's direction in view space (SM64's (0x28, 0x28, 0x28): from above, right and behind the
+        // camera), so whatever faces the camera is lit. The view isn't known here: as for environment maps, the camera is
+        // taken as level with the triangle and facing it, the normal's sideways part counting half
         float nl = sqrtf(nx * nx + ny * ny + nz * nz), ll = sqrtf((float)(g->lightDir[0] * g->lightDir[0] + g->lightDir[1] * g->lightDir[1] + g->lightDir[2] * g->lightDir[2]));
-        float ndl = (nl > 0 && ll > 0) ? (nx * g->lightDir[0] + ny * g->lightDir[1] + nz * g->lightDir[2]) / (nl * ll) : 0;
+        float ndl = 0;
+        if (nl > 0 && ll > 0) {
+            float vx = nx / nl * 0.5f, vy = ny / nl, vz2 = 1.0f - vx * vx - vy * vy, vz = vz2 > 0 ? sqrtf(vz2) : 0;
+            ndl = (vx * g->lightDir[0] + vy * g->lightDir[1] + vz * g->lightDir[2]) / ll;
+        }
         if (ndl < 0) ndl = 0;
         ndl = floorf(ndl * 8.0f + 0.5f) / 8.0f;
         for (int k = 0; k < 3; k++) { int v = (int)(g->ambient[k] + g->diffuse[k] * ndl); shade[k] = (uint8_t)(v > 255 ? 255 : v); }
     }
+    CombIn cin;
+    memset(&cin, 0, sizeof(cin));
+    if (lit) { memcpy(cin.shade, shade, 3); cin.shade[3] = vs[0]->a; }
+    else { memcpy(cin.shade, vs[0]->c, 3); cin.shade[3] = vs[0]->a; }
+    memcpy(cin.prim, g->prim, 4); memcpy(cin.env, g->env, 4);
     if (textured) {
         int t = 0;
         int w = g->tile[t].w, h = g->tile[t].h;
         if (w <= 0) w = g->tile[t].maskS ? 1 << g->tile[t].maskS : 32;
         if (h <= 0) h = g->tile[t].maskT ? 1 << g->tile[t].maskT : 32;
         int texgen = (g->geom & 0x40000) != 0;
-        // lit: the light's colour tints the texture; unlit: the vertex colour does (taken from the first vertex)
-        const uint8_t *tint = !g->shadeUsed ? white : lit ? shade : texgen ? white : vs[0]->c;   // a decal ignores the shade
-        s_texGain = texgen ? 260 : 100;
-        rc = atlas_texture(g->loaded, g->tile[t].fmt, g->tile[t].siz, w, h, tint, g->opaque);
-        s_texGain = 100;
+        rc = atlas_texture(g->loaded, g->tile[t].fmt, g->tile[t].siz, w, h, &g->comb, &cin, g->opaque);
         if (!rc) return;
         for (int i = 0; i < 3; i++) {
             if (texgen) {
-                // environment mapping: the texture coordinates come from the normal (here in model space, the view isn't known)
-                st[i][0] = ((int8_t)vs[i]->c[0] / 127.0f * 0.5f + 0.5f) * w;
-                st[i][1] = (0.5f - (int8_t)vs[i]->c[1] / 127.0f * 0.5f) * h;
+                // environment mapping (G_TEXTURE_GEN): the N64 maps the view-space normal's x, y from -1..1 across
+                // scale / 64 texels (0x7C0 -> 31, the 32 texels of a star's or cap's map). The view isn't known here, so the
+                // camera is taken as level with the surface and facing it: up-facing normals see the bottom of the map
+                // (the metal map's sky: it is a fish-eye picture, upside down), down-facing the top, and the sideways part of the normal moves across it only half as far,
+                // which keeps faces seen head-on out of the map's dark rim.
+                float nx = (int8_t)vs[i]->c[0] / 127.0f, ny = (int8_t)vs[i]->c[1] / 127.0f;
+                st[i][0] = (0.5f + nx * 0.25f) * (g->scaleS / 64.0f);
+                st[i][1] = (0.5f + ny * 0.5f) * (g->scaleT / 64.0f);
                 continue;
             }
             st[i][0] = vs[i]->s * (g->scaleS / 65536.0f) / 32.0f;
@@ -307,12 +373,11 @@ static void emit_tri(GfxState *g, int a, int b, int c)
 #endif
                 break; }
         }
-    } else if (lit) {
-        rc = atlas_color(shade[0], shade[1], shade[2], 255);
-        if (!rc) return;
     } else {
-        // unlit and untextured: the vertex colour (the first vertex's, for the whole triangle)
-        rc = atlas_color(vs[0]->c[0], vs[0]->c[1], vs[0]->c[2], vs[0]->a ? vs[0]->a : 255);
+        // untextured: the combiner with no texel (G_CC_SHADE, or a fade's shade plus the environment alpha)
+        uint8_t zero[4] = { 0, 0, 0, 0 }, col[4];
+        combine_texel(&g->comb, &cin, zero, col);
+        rc = atlas_color(col[0], col[1], col[2], g->opaque || !col[3] ? 255 : col[3]);
         if (!rc) return;
     }
     (void)ids;
@@ -420,11 +485,13 @@ static void run_dl(uint32_t addr, GfxState *g, int depth)
         case 0xBB:     // G_TEXTURE
             g->texOn = (w0 & 0xFF) != 0; g->scaleS = w1 >> 16; g->scaleT = w1 & 0xFFFF;
             break;
-        case 0xFC: {   // G_SETCOMBINE, cycle 1's colour inputs (a - b) * c + d: does SHADE (4) take part?
-            int a0 = (w0 >> 20) & 15, c0 = (w0 >> 15) & 31, b0 = (w1 >> 28) & 15, d0 = (w1 >> 15) & 7;
-            g->shadeUsed = a0 == 4 || b0 == 4 || c0 == 4 || d0 == 4;
+        case 0xFC: {   // G_SETCOMBINE, cycle 1's inputs, (a - b) * c + d for colour and alpha
+            g->comb.a = (w0 >> 20) & 15; g->comb.c = (w0 >> 15) & 31; g->comb.b = (w1 >> 28) & 15; g->comb.d = (w1 >> 15) & 7;
+            g->comb.aa = (w0 >> 12) & 7; g->comb.ac = (w0 >> 9) & 7; g->comb.ab = (w1 >> 12) & 7; g->comb.ad = (w1 >> 9) & 7;
             break;
         }
+        case 0xFA: g->prim[0] = w1 >> 24; g->prim[1] = w1 >> 16; g->prim[2] = w1 >> 8; g->prim[3] = w1; break;   // G_SETPRIMCOLOR
+        case 0xFB: g->env[0] = w1 >> 24; g->env[1] = w1 >> 16; g->env[2] = w1 >> 8; g->env[3] = w1; break;      // G_SETENVCOLOR
         case 0xFD:     // G_SETTIMG
             g->timg = w1; g->timgFmt = (w0 >> 21) & 7; g->timgSiz = (w0 >> 19) & 3;
             break;
@@ -466,7 +533,9 @@ static int piece_for(uint32_t dl, int alpha, int opaque)
     GfxState g;
     memset(&g, 0, sizeof(g));
     g.piece = pc; g.opaque = opaque; g.root = dl;
-    g.shadeUsed = 1; g.geom = 0x1 | 0x4 | 0x200 | 0x2000 | 0x20000;   // what SM64 sets before drawing an object: z-buffer, shade, smooth, cull back, lighting
+    g.comb.d = 4; g.comb.ad = 4;   // G_CC_SHADE
+    memset(g.prim, 255, 4); memset(g.env, 255, 4);
+    g.geom = 0x1 | 0x4 | 0x200 | 0x2000 | 0x20000;   // what SM64 sets before drawing an object: z-buffer, shade, smooth, cull back, lighting
     g.diffuse[0] = g.diffuse[1] = g.diffuse[2] = 255;
     run_dl(dl, &g, 0);
     s_pieceKeys[s_nPieces].dl = dl; s_pieceKeys[s_nPieces].alpha = alpha; s_pieceKeys[s_nPieces].piece = s_nPieces;
@@ -714,8 +783,11 @@ static void eval_node(Eval *e, int i, Mat4 parent)
     switch (n->type) {
     case N_GROUP: eval_list(e, n->child, parent, 0); return;
     case N_SWITCH: {
+        // geo_switch_anim_state puts oAnimState back to 0 once it reaches the case count, so a counter that only ever
+        // goes up (a coin's spin, an explosion's frames) cycles through the cases
         int sel = e->pose->animState;
-        if (sel < 0 || sel >= n->cases) sel = 0;
+        if (sel < 0) sel = 0;
+        if (n->cases > 0) sel %= n->cases;
         int c = n->child;
         for (int k = 0; k < sel && c >= 0; k++) c = e->tree->n[c].next;
         if (c >= 0) eval_node(e, c, parent);   // exactly one child
