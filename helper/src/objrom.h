@@ -8,9 +8,11 @@
 
 enum {   // models
     OM_COIN_YELLOW, OM_COIN_RED, OM_COIN_BLUE, OM_STAR, OM_STAR_TRANSPARENT,
-    OM_CAP_METAL, OM_CAP_WING, OM_GOOMBA, OM_BOBOMB, OM_KOOPA, OM_KOOPA_SHELL, OM_EXPLOSION, OM_KOOPA_NOSHELL, OM_SPARKLES, OM_MIST, OM_SMOKE,
+    OM_CAP_METAL, OM_CAP_WING, OM_GOOMBA, OM_BOBOMB, OM_KOOPA, OM_KOOPA_SHELL, OM_EXPLOSION, OM_KOOPA_NOSHELL, OM_SPARKLES, OM_MIST, OM_SMOKE, OM_NUMBER,
     OM_COUNT
 };
+
+int objrom_texture_rgba(uint32_t addr, int fmt, int siz, int w, int h, uint8_t *out);
 
 #pragma pack(push, 1)
 typedef struct { int16_t p[3]; int8_t n[3]; int8_t pad; uint16_t uv[2]; } ObjVert;   // p in SM64 units; uv in the atlas (0..65535)

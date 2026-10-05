@@ -158,6 +158,8 @@ typedef uint32_t u32;
 #define SOUND_GENERAL_COIN_SPURT   SND_ARG(3, 0, 0x30, 0x00, 8)
 #define SOUND_GENERAL_COIN_DROP    SND_ARG(3, 0, 0x36, 0x40, 8)
 #define SOUND_MENU_COLLECT_RED_COIN SND_ARG(7, 8, 0x28, 0x90, 8)
+#define SOUND_ENV_STAR             SND_ARG(4, 0, 0x14, 0x00, 1)
+#define SOUND_GENERAL_STAR_APPEARS SND_ARG(3, 0, 0x57, 0xFF, 9)
 #define SOUND_MENU_STAR_SOUND      SND_ARG(7, 0, 0x1E, 0xFF, 8)
 #define SOUND_OBJ_GOOMBA_WALK      SND_ARG(5, 0, 0x20, 0x00, 8)
 #define SOUND_OBJ_BOBOMB_WALK      SND_ARG(5, 0, 0x27, 0x00, 8)
@@ -173,7 +175,7 @@ typedef uint32_t u32;
 #define SOUND_GENERAL2_BOBOMB_EXPLOSION SND_ARG(8, 0, 0x2E, 0x20, 8)
 
 enum { B_NONE, B_COIN, B_STAR, B_CAP, B_STAR_POWER, B_GOOMBA, B_BOBOMB, B_KOOPA, B_SHELL, B_EXPLOSION, B_SPAWNED_COIN,
-       B_MIST, B_SPARKLE, B_CELEB_STAR, B_SMOKE };
+       B_MIST, B_SPARKLE, B_CELEB_STAR, B_SMOKE, B_RED_MARKER, B_STAR_SPAWN, B_ORANGE_NUMBER, B_COIN_SPARKLE };
 enum { L_LEVEL, L_PUSHABLE, L_DESTRUCTIVE, L_GENACTOR };
 
 // ---- math (SM64's angles are s16, 0x10000 to a turn, 0 = +z, sin for x) -------------------------------------------
@@ -269,6 +271,8 @@ typedef struct Obj {
     int fuseLit, fuseTimer;
     int heldState;           // HELD_FREE, HELD_HELD (Mario carries it), HELD_THROWN, HELD_DROPPED
     int smokeTimer;
+    int persist;             // part of a red coin course: kept however far Mario goes
+    float starFC;            // bhvStarSpawnCoordinates' oStarSpawnUnkFC
     int capF4, capF8;
     float coinBaseVelY;
     float puffScale; int opacity, opacityStep, puffGrow;
@@ -285,6 +289,9 @@ static uint16_t s_nextId = 1;
 static u32 s_nextPickupSpawn, s_nextEnemySpawn;
 static int s_starTicks;        // the invincibility star
 static int s_prevCapFlags;
+// a red coin course, as a level's: eight red coins and the hidden red coin star (bhvHiddenRedCoinStar) with its marker
+static struct { int active, count, timer; float star[3]; uint16_t markerId; } s_red;
+static int s_starSpawnJingle;   // ticks of the star-spawn jingle still to play (main.c's music override)
 static uint16_t s_grabOffered;   // the grabbable object last offered to Mario (interact_grabbable)
 static uint16_t s_heldId;        // the one he holds
 enum { HELD_FREE, HELD_HELD, HELD_THROWN, HELD_DROPPED };
@@ -896,6 +903,8 @@ static Obj *spawn_coin_burst(const float *pos, int blue, float baseVelY)
 // ---- particles -------------------------------------------------------------------------------------------------------
 // spawn_mist_particles_variable / cur_obj_spawn_particles with sMistParticles: white puffs (MODEL_MIST,
 // bhvWhitePuffExplosion) flung out round a point. count 0 means 20, up to 20 means 4.
+static int find_spot(float *out);
+
 static void spawn_mist_particles_at(const float *pos, int count, float offsetY, float size)
 {
     float sizeBase = size, sizeRange = size / 20.0f;
@@ -1079,12 +1088,190 @@ static void interact_bounce_top(Obj *o)
 
 static void interact_damage(Obj *o) { take_damage_and_knock_back(o); }
 
+// spawn_orange_number: the count, rising and bouncing over where the coin was, then a few sparkles
+static void spawn_orange_number(Obj *at, int n)
+{
+    if (n >= 10) return;
+    Obj *num = obj_alloc(B_ORANGE_NUMBER, ENT_NUMBER, OM_NUMBER, L_LEVEL);
+    if (!num) return;
+    memcpy(num->pos, at->pos, 12);
+    num->pos[1] += 25.0f;
+    memcpy(num->home, num->pos, 12);
+    num->animState = n;          // bhv_orange_number_init
+    num->vel[1] = 26.0f;
+    num->billboard = 1;
+    become_intangible(num);
+}
+
+static void bhv_orange_number_loop(Obj *o)
+{
+    o->pos[1] += o->vel[1];
+    o->vel[1] -= 2.0f;
+    if (o->vel[1] < -21.0f) o->vel[1] = 14.0f;
+    if (o->timer == 35) {
+        // bhvGoldenCoinSparkles: three ticks of sparkles round where it was
+        for (int k = 0; k < 3; k++) {
+            Obj *sp = obj_alloc(B_COIN_SPARKLE, ENT_SPARKLES, OM_SPARKLES, L_LEVEL);
+            if (!sp) break;
+            memcpy(sp->pos, o->pos, 12);
+            sp->pos[0] += random_float() * 60.0f - 30.0f; sp->pos[1] += random_float() * 60.0f - 60.0f; sp->pos[2] += random_float() * 60.0f - 30.0f;
+            sp->animState = -1; sp->billboard = 1; sp->invisible = k;   // one more each tick
+            become_intangible(sp);
+        }
+        obj_delete(o);
+    }
+}
+
+static void bhv_coin_sparkle_loop(Obj *o)
+{
+    if (o->invisible > 0) { o->invisible--; return; }
+    o->animState++;
+    if (o->animState >= 11) obj_delete(o);
+}
+
+// bhvSparkleSpawn: a sparkle round a moving star, at a random offset and size
+static void spawn_star_sparkle(Obj *o)
+{
+    Obj *sp = obj_alloc(B_COIN_SPARKLE, ENT_SPARKLES, OM_SPARKLES, L_LEVEL);
+    if (!sp) return;
+    memcpy(sp->pos, o->pos, 12);
+    for (int k = 0; k < 3; k++) sp->pos[k] += (random_float() - 0.5f) * 90.0f;
+    float s = random_float() + 0.0f;
+    if (s < 0.2f) s = 0.2f;
+    sp->scale[0] = sp->scale[1] = sp->scale[2] = s;
+    sp->animState = -1; sp->billboard = 1;
+    become_intangible(sp);
+}
+
+static const Hitbox k_starHb2 = { INTERACT_STAR_OR_KEY, 0, 0, 0, 0, 80, 50, 0, 0 };
+
+// bhvStarSpawnCoordinates (spawn_red_coin_cutscene_star): from the hidden star it jumps up in an arc with a trail of
+// sparkles, plays the star-spawn jingle, floats down to its place and can be collected there
+static void spawn_red_coin_star(const float *at)
+{
+    Obj *o = obj_alloc(B_STAR_SPAWN, ENT_POWER_STAR, OM_STAR, L_LEVEL);
+    if (!o) return;
+    memcpy(o->pos, at, 12); memcpy(o->home, at, 12);
+    o->persist = 1;
+    // bhv_star_spawn_init
+    o->moveYaw = atan2s(o->home[2] - o->pos[2], o->home[0] - o->pos[0]);
+    float dis = sqrtf(sqr(o->home[0] - o->pos[0]) + sqr(o->home[2] - o->pos[2]));
+    o->vel[1] = (o->home[1] - o->pos[1]) / 30.0f;
+    o->fwd = dis / 30.0f;
+    o->starFC = o->pos[1];
+    become_intangible(o);
+}
+
+static void obj_move_xyz_using_fvel_and_yaw(Obj *o)
+{
+    o->vel[0] = o->fwd * sins(o->moveYaw); o->vel[2] = o->fwd * coss(o->moveYaw);
+    o->pos[0] += o->vel[0]; o->pos[1] += o->vel[1]; o->pos[2] += o->vel[2];
+}
+
+static void bhv_star_spawn_loop(Obj *o)
+{
+    switch (o->action) {
+    case 0:
+        o->faceYaw += 0x1000;
+        if (o->timer > 20) o->action = 1;
+        break;
+    case 1:
+        obj_move_xyz_using_fvel_and_yaw(o);
+        o->starFC += o->vel[1];
+        o->pos[1] = o->starFC + sins((s16)((o->timer * 0x8000) / 30)) * 400.0f;
+        o->faceYaw += 0x1000;
+        spawn_star_sparkle(o);
+        obj_sound(o, SOUND_ENV_STAR);
+        if (o->timer == 30) {
+            o->action = 2;
+            o->fwd = 0;
+            s_starSpawnJingle = 4 * 30;   // play_power_star_jingle
+        }
+        break;
+    case 2:
+        o->vel[1] = o->timer < 20 ? (float)(20 - o->timer) : -10.0f;
+        spawn_star_sparkle(o);
+        obj_move_xyz_using_fvel_and_yaw(o);
+        o->faceYaw = (s16)(o->faceYaw - o->timer * 0x10 + 0x1000);
+        obj_sound(o, SOUND_ENV_STAR);
+        if (o->pos[1] < o->home[1]) {
+            obj_sound(o, SOUND_GENERAL_STAR_APPEARS);
+            obj_set_hitbox(o, &k_starHb2);
+            become_tangible(o);
+            o->pos[1] = o->home[1];
+            o->action = 3;
+        }
+        break;
+    case 3:
+        o->faceYaw += 0x800;
+        if (o->interactStatus & INT_STATUS_INTERACTED) { obj_delete(o); return; }
+        break;
+    }
+}
+
+// a red coin course: the hidden star a little way off, its transparent marker lying on the ground under it
+// (bhvRedCoinStarMarker), and eight red coins round about
+static void start_red_coin_course(void)
+{
+    float p[3];
+    if (!find_spot(p)) return;
+    memset(&s_red, 0, sizeof(s_red));
+    s_red.star[0] = p[0]; s_red.star[1] = p[1] + 300.0f; s_red.star[2] = p[2];
+    Obj *mk = obj_alloc(B_RED_MARKER, ENT_RED_MARKER, OM_STAR_TRANSPARENT, L_LEVEL);
+    if (!mk) return;
+    memcpy(mk->pos, p, 12);
+    mk->pos[1] += 60.0f;                                    // DROP_TO_FLOOR, ADD_FLOAT(oPosY, 60)
+    mk->scale[0] = mk->scale[1] = mk->scale[2] = 1.5f;      // SCALE(150)
+    mk->facePitch = 0x4000;
+    mk->persist = 1;
+    become_intangible(mk);
+    s_red.markerId = mk->id;
+    int placed = 0;
+    for (int tries = 0; tries < 40 && placed < 8; tries++) {
+        float c[3];
+        if (!find_spot(c)) continue;
+        Obj *o = obj_alloc(B_COIN, ENT_COIN_RED, OM_COIN_RED, L_LEVEL);
+        if (!o) break;
+        memcpy(o->pos, c, 12);
+        o->billboard = 1; o->persist = 1;
+        obj_set_hitbox(o, &k_redCoinHb);
+        o->animState = (int)(random_float() * 8);
+        placed++;
+    }
+    s_red.active = 1;
+    s_red.count = 8 - placed;   // bhv_hidden_red_coin_star_init: 8 less the red coins there are
+}
+
+static void update_red_coin_course(void)
+{
+    if (!s_red.active) return;
+    if (s_red.count < 8) { s_red.timer = 0; return; }
+    if (++s_red.timer > 2) {    // bhv_hidden_red_coin_star_loop, action 1
+        spawn_red_coin_star(s_red.star);
+        spawn_mist_particles_at(s_red.star, 0, 0, 46.0f);
+        for (int i = 0; i < MAX_OBJ; i++) if (s_obj[i].used && s_obj[i].id == s_red.markerId) obj_delete(&s_obj[i]);
+        s_red.active = 0;
+    }
+}
+
+int ents_star_spawn_jingle(void)
+{
+    if (s_starSpawnJingle > 0) { s_starSpawnJingle--; return 1; }
+    return 0;
+}
+
 static void interact_coin(Obj *o)
 {
     o->interactStatus = INT_STATUS_INTERACTED;
     int v = o->damage;
     s_host.lock(); sm64_mario_heal(M.id, (uint8_t)(4 * v)); s_host.unlock();
-    play_sound(v >= 2 ? SOUND_MENU_COLLECT_RED_COIN : SOUND_GENERAL_COIN);
+    if (o->ent == ENT_COIN_RED && o->persist && s_red.active) {
+        // bhv_red_coin_loop: the hidden star's counter goes up, an orange number shows it (not for the eighth), and each
+        // coin plays the next, higher red coin sound
+        s_red.count++;
+        if (s_red.count != 8) spawn_orange_number(o, s_red.count);
+        play_sound(SOUND_MENU_COLLECT_RED_COIN + ((u32)(uint8_t)(s_red.count - 1) << 16));
+    } else play_sound(v >= 2 ? SOUND_MENU_COLLECT_RED_COIN : SOUND_GENERAL_COIN);
     emit(EV_COIN, o->id, o->pos, (float)v);
 }
 
@@ -2073,7 +2260,10 @@ void ents_init(const EntHost *host)
 void ents_set_options(int pickups, int enemies)
 {
     pickups = pickups != 0; enemies = enemies != 0;
-    if (!pickups && s_pickupsOn) for (int i = 0; i < MAX_OBJ; i++) if (s_obj[i].used && (is_pickup(s_obj[i].ent) || s_obj[i].bhv == B_SPAWNED_COIN)) s_obj[i].used = 0;
+    if (!pickups && s_pickupsOn) {
+        for (int i = 0; i < MAX_OBJ; i++) if (s_obj[i].used && (is_pickup(s_obj[i].ent) || s_obj[i].bhv == B_SPAWNED_COIN || s_obj[i].bhv == B_RED_MARKER)) s_obj[i].used = 0;
+        memset(&s_red, 0, sizeof(s_red));
+    }
     if (!enemies && s_enemiesOn) for (int i = 0; i < MAX_OBJ; i++) if (s_obj[i].used && (is_enemy(s_obj[i].ent) || s_obj[i].ent == ENT_EXPLOSION)) s_obj[i].used = 0;
     s_pickupsOn = pickups; s_enemiesOn = enemies;
 }
@@ -2081,12 +2271,12 @@ void ents_set_options(int pickups, int enemies)
 void ents_get_options(int *pickups, int *enemies) { *pickups = s_pickupsOn; *enemies = s_enemiesOn; }
 int ents_star_active(void) { return s_starTicks > 0; }
 int ents_star_dancing(void) { return M.action == ACT_STAR_DANCE_NO_EXIT || M.action == ACT_STAR_DANCE_WATER || M.action == ACT_FALL_AFTER_STAR_GRAB; }
-void ents_clear(void) { memset(s_obj, 0, sizeof(s_obj)); s_starTicks = 0; }
+void ents_clear(void) { memset(s_obj, 0, sizeof(s_obj)); s_starTicks = 0; memset(&s_red, 0, sizeof(s_red)); }
 
 int ents_count(int enemies)
 {
     int n = 0;
-    for (int i = 0; i < MAX_OBJ; i++) if (s_obj[i].used && (enemies ? is_enemy(s_obj[i].ent) : (is_pickup(s_obj[i].ent) && s_obj[i].bhv != B_SPAWNED_COIN))) n++;
+    for (int i = 0; i < MAX_OBJ; i++) if (s_obj[i].used && (enemies ? is_enemy(s_obj[i].ent) : (is_pickup(s_obj[i].ent) && s_obj[i].bhv != B_SPAWNED_COIN && !s_obj[i].persist))) n++;
     return n;
 }
 
@@ -2134,6 +2324,10 @@ static void spawn_pickup(void)
     static const int types[] = { ENT_COIN_YELLOW, ENT_COIN_RED, ENT_COIN_BLUE, ENT_POWER_STAR, ENT_CAP_METAL, ENT_CAP_WING, ENT_STAR_POWER };
     static const int weights[] = { 55, 8, 4, 4, 8, 8, 5 };
     int type = s_testType ? s_testType : pick_weighted(types, weights, 7);
+    if (type == ENT_COIN_RED && !s_testType) {   // red coins come as a course of eight, one course at a time
+        if (!s_red.active) start_red_coin_course();
+        return;
+    }
     if (!s_testType && type >= ENT_POWER_STAR && count_ent(type) >= 1) return;
     float p[3];
     int ok = 1;
@@ -2209,6 +2403,7 @@ static void spawn_enemy(void)
 void ents_debug_show(int model, const float *posSm, int yaw, int animState, int animIdx, int frame)
 {
     if (model == 255) { for (int i = 0; i < MAX_OBJ; i++) if (s_obj[i].used && s_obj[i].bhv == B_NONE) s_obj[i].used = 0; return; }
+    if (model == 199) { if (!s_red.active) start_red_coin_course(); return; }   // tests: a red coin course
     if (model >= 200) { s_testType = model - 200; memcpy(s_testPos, posSm, 12); if (s_testType >= ENT_GOOMBA) spawn_enemy(); else spawn_pickup(); s_testType = 0; return; }   // a real one
     if (model < 0 || model >= OM_COUNT) return;
     Obj *o = obj_alloc(B_NONE, ENT_EXPLOSION + 5, model, L_LEVEL);
@@ -2264,6 +2459,10 @@ static void update_object(Obj *o)
     case B_SPARKLE: bhv_celebration_star_sparkle_loop(o); break;
     case B_CELEB_STAR: bhv_celebration_star_loop(o); break;
     case B_SMOKE: bhv_dust_smoke_loop(o); break;
+    case B_RED_MARKER: o->faceYaw += 0x100; break;
+    case B_STAR_SPAWN: bhv_star_spawn_loop(o); break;
+    case B_ORANGE_NUMBER: bhv_orange_number_loop(o); break;
+    case B_COIN_SPARKLE: bhv_coin_sparkle_loop(o); break;
     }
     if (!o->used) return;
 
@@ -2297,6 +2496,7 @@ void ents_tick(uint32_t tick, int marioId, const struct SM64MarioState *st)
     if ((M.action == ACT_STAR_DANCE_NO_EXIT || M.action == ACT_STAR_DANCE_WATER) && M.prevAction != M.action) spawn_celebration_star();
 
     update_held_object();
+    update_red_coin_course();
 
     // Mario touches things (SM64: detect_object_collisions, then Mario's own update), then they all update
     detect_collisions_and_interact();
@@ -2315,7 +2515,7 @@ void ents_tick(uint32_t tick, int marioId, const struct SM64MarioState *st)
         Obj *o = &s_obj[i];
         if (!o->used) continue;
         float dist2d = sqrtf(sqr(o->pos[0] - M.pos[0]) + sqr(o->pos[2] - M.pos[2]));
-        if (dist2d > 100.0f / S && !o->ridden) { o->used = 0; continue; }
+        if (dist2d > 100.0f / S && !o->ridden && !o->persist) { o->used = 0; continue; }
         if (o->bhv == B_NONE) continue;
         update_object(o);
     }

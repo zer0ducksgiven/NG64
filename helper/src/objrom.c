@@ -15,6 +15,7 @@ int png_write_rgba(const char *path, const uint8_t *rgba, int w, int h);
 
 // ---- where things are in the US ROM ------------------------------------------------------------------------------
 static const struct { int seg; uint32_t rom; } k_banks[] = {   // MIO0 banks
+    { 2, 0x108A40 },    // segment 2: the billboard digits
     { 3, 0x201410 },    // common1: coin, star, caps, explosion
     { 4, 0x114750 },    // Mario
     { 6, 0x1C4230 },    // group 14: koopa
@@ -35,7 +36,7 @@ static const struct { int model; uint32_t geo; } k_models[OM_COUNT] = {
     [OM_KOOPA] = { OM_KOOPA, 0x0D000214 }, [OM_KOOPA_SHELL] = { OM_KOOPA_SHELL, 0x0F000AB0 },
     [OM_EXPLOSION] = { OM_EXPLOSION, 0x16000040 }, [OM_KOOPA_NOSHELL] = { OM_KOOPA_NOSHELL, 0x0D0000D0 },
     [OM_SPARKLES] = { OM_SPARKLES, 0x170001BC }, [OM_MIST] = { OM_MIST, 0x16000000 },
-    [OM_SMOKE] = { OM_SMOKE, 0x17000038 },
+    [OM_SMOKE] = { OM_SMOKE, 0x17000038 }, [OM_NUMBER] = { OM_NUMBER, 0x16000E14 },
 };
 
 static const uint8_t *s_rom;
@@ -268,7 +269,7 @@ static void piece_add_vertex(GfxState *g, const SVtx *v, Rect *rc, float s, floa
     ObjVert o;
     memset(&o, 0, sizeof(o));
     o.p[0] = v->p[0]; o.p[1] = v->p[1]; o.p[2] = v->p[2];
-    if (lit) { o.n[0] = (int8_t)v->c[0]; o.n[1] = (int8_t)v->c[1]; o.n[2] = (int8_t)v->c[2]; }
+    if (lit) { o.n[0] = (int8_t)v->c[0]; o.n[1] = (int8_t)v->c[1]; o.n[2] = (int8_t)v->c[2]; o.pad = 1; }   // pad: lit, the normal is real
     else { o.n[0] = 0; o.n[1] = 0; o.n[2] = 127; }
     float u, w;
     if (rc->w == 1 && rc->h == 1) { u = rc->x + 0.5f; w = rc->y + 0.5f; }
@@ -338,7 +339,10 @@ static void emit_tri(GfxState *g, int a, int b, int c)
         }
         if (ndl < 0) ndl = 0;
         ndl = floorf(ndl * 8.0f + 0.5f) / 8.0f;
-        for (int k = 0; k < 3; k++) { int v = (int)(g->ambient[k] + g->diffuse[k] * ndl); shade[k] = (uint8_t)(v > 255 ? 255 : v); }
+        // as libsm64 colours Mario: the light's diffuse colour, the shading left to BeamNG's light on the real normals,
+        // so the objects and Mario are lit alike
+        (void)ndl;
+        for (int k = 0; k < 3; k++) shade[k] = g->diffuse[k];
     }
     CombIn cin;
     memset(&cin, 0, sizeof(cin));
@@ -381,7 +385,10 @@ static void emit_tri(GfxState *g, int a, int b, int c)
         if (!rc) return;
     }
     (void)ids;
-    if (lit) g->piece->litTris++; else g->piece->unlitTris++;
+    // shaded by the light only where the combiner takes the shade colour (a decal or an environment map isn't): those
+    // surfaces are lit by BeamNG on their normals, as Mario is; the rest show their colours flat
+    int shaded = lit && (g->comb.a == 4 || g->comb.b == 4 || g->comb.c == 4 || g->comb.d == 4 || g->comb.c == 11);
+    if (shaded) g->piece->litTris++; else g->piece->unlitTris++;
 
     // A clamped texture is clamped per pixel on the N64. Here it is per vertex, which smears any triangle that crosses the
     // texture's edge, so those are cut along the edges first: each piece then lies wholly inside, or wholly in one clamped
@@ -400,7 +407,7 @@ static void emit_tri(GfxState *g, int a, int b, int c)
     for (int i = 0; i < 3; i++)
         if ((clampS && (st[i][0] < -0.01f || st[i][0] > cw + 0.01f)) || (clampT && (st[i][1] < -0.01f || st[i][1] > ch + 0.01f))) outside = 1;
     if (!outside) {
-        for (int i = 0; i < 3; i++) piece_add_vertex(g, vs[i], rc, st[i][0], st[i][1], lit, &idx[i]);
+        for (int i = 0; i < 3; i++) piece_add_vertex(g, vs[i], rc, st[i][0], st[i][1], shaded, &idx[i]);
         ObjPiece *pc = g->piece;
         pc->idx = realloc(pc->idx, sizeof(uint16_t) * (pc->ni + 3));
         pc->idx[pc->ni++] = (uint16_t)idx[0]; pc->idx[pc->ni++] = (uint16_t)idx[1]; pc->idx[pc->ni++] = (uint16_t)idx[2];
@@ -436,7 +443,7 @@ static void emit_tri(GfxState *g, int a, int b, int c)
             float s2 = cv->s, t2 = cv->t;
             if (clampS) s2 = s2 < 0 ? 0 : s2 > cw ? (float)cw : s2;
             if (clampT) t2 = t2 < 0 ? 0 : t2 > ch ? (float)ch : t2;
-            piece_add_vertex(g, &tmp, rc, s2, t2, lit, &ix[i]);
+            piece_add_vertex(g, &tmp, rc, s2, t2, shaded, &ix[i]);
         }
         ObjPiece *pc = g->piece;
         for (int i = 1; i + 1 < n; i++) {
@@ -543,6 +550,14 @@ static int piece_for(uint32_t dl, int alpha, int opaque)
     run_dl(dl, &g, 0);
     s_pieceKeys[s_nPieces].dl = dl; s_pieceKeys[s_nPieces].alpha = alpha; s_pieceKeys[s_nPieces].piece = s_nPieces;
     return s_nPieces++;
+}
+
+// a texture straight from the ROM's banks (Mario's metal map, which libsm64 doesn't load), RGBA8
+int objrom_texture_rgba(uint32_t addr, int fmt, int siz, int w, int h, uint8_t *out)
+{
+    int ok = decode_texture(addr, fmt, siz, w, h, out);
+    if (!ok) s_failed = 0;
+    return ok;
 }
 
 int objrom_piece_count(void) { return s_nPieces; }

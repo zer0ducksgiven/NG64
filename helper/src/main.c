@@ -120,6 +120,12 @@ static void send_log(const char *msg)
 #define BAND_H      64
 #define MAX_BANDS   (ATLAS_H / BAND_H)
 #define SOLID_X0    (SM64_TEXTURE_WIDTH + 8)   // solid-colour patch right of the decals
+// Mario's metal map (64 x 32, from the ROM: libsm64 leaves it out), right of the solid patch in every band, tinted by
+// the band's colour as SM64's G_CC_MODULATERGB tints it by the light
+#define METAL_X0    (SOLID_X0 + 40)
+#define METAL_Y0    16
+static uint8_t s_metalTex[64 * 32 * 4];
+static int s_metalOk;
 
 static uint8_t *s_marioTex;       // SM64_TEXTURE_WIDTH x SM64_TEXTURE_HEIGHT RGBA
 static float s_bandColor[MAX_BANDS][3];
@@ -163,6 +169,11 @@ static void write_atlas(void)
                     o[0] = (uint8_t)(cr + (t[0] - cr) * a);
                     o[1] = (uint8_t)(cg + (t[1] - cg) * a);
                     o[2] = (uint8_t)(cb + (t[2] - cb) * a);
+                } else if (s_metalOk && x >= METAL_X0 - 4 && x < METAL_X0 + 68 && y >= METAL_Y0 - 4 && y < METAL_Y0 + 36) {
+                    int mx = x - METAL_X0, my = y - METAL_Y0;   // edges replicated a few texels out
+                    mx = mx < 0 ? 0 : mx > 63 ? 63 : mx; my = my < 0 ? 0 : my > 31 ? 31 : my;
+                    const uint8_t *t = s_metalTex + ((size_t)my * 64 + mx) * 4;
+                    o[0] = (uint8_t)(t[0] * cr / 255); o[1] = (uint8_t)(t[1] * cg / 255); o[2] = (uint8_t)(t[2] * cb / 255);
                 } else {
                     o[0] = cr; o[1] = cg; o[2] = cb;
                 }
@@ -1317,6 +1328,7 @@ static int music_override(void)
     if (dancing && !wasDancing) jingleTicks = 5 * 30;
     wasDancing = dancing;
     if (jingleTicks > 0) { jingleTicks--; return 0x01; }
+    if (ents_star_spawn_jingle()) return 0x15;   // SEQ_EVENT_CUTSCENE_STAR_SPAWN: a star has appeared
     if (m->state.flags & MARIO_METAL_CAP) return 0x0F;                     // Metallic Mario
     if (m->state.flags & (MARIO_WING_CAP | MARIO_VANISH_CAP)) return 0x0E;   // Powerful Mario
     if (ents_star_active()) return 0x14;                                     // Race Fanfare
@@ -1834,7 +1846,7 @@ extern unsigned char g_ng64TriPart[SM64_GEO_MAX_TRIANGLES];
 extern float g_ng64LocalPos[SM64_GEO_MAX_TRIANGLES * 9];
 extern float g_ng64LocalNrm[SM64_GEO_MAX_TRIANGLES * 9];
 
-static void pack_vert(PackedVert *out, const float *smLocal, const float *smNormal, const float *color, const float *uv)
+static void pack_vert(PackedVert *out, const float *smLocal, const float *smNormal, const float *color, const float *uv, int metal)
 {
     float b[3] = { smLocal[0] * S, -smLocal[2] * S, smLocal[1] * S };   // sm2bng, as a direction (no origin)
     for (int k = 0; k < 3; k++) {
@@ -1851,7 +1863,17 @@ static void pack_vert(PackedVert *out, const float *smLocal, const float *smNorm
     int band = band_for_color(color);
     float u = uv[0], v = uv[1];
     float au, av;
-    if (u >= 1.0f && v >= 1.0f) {   // untextured triangle: solid patch
+    if (metal && s_metalOk) {
+        // Metal Mario: SM64 environment-maps him (G_TEXTURE_GEN) from his normals. With the view unknown, as for the
+        // metal cap: the camera level with the surface and facing it - up-facing normals see the map's sky (its
+        // bottom), the sideways part of the normal moves across it half as far. The part's own normal keeps a look
+        // the same from frame to frame (its geometry is cached by look).
+        float l = sqrtf(smNormal[0] * smNormal[0] + smNormal[1] * smNormal[1] + smNormal[2] * smNormal[2]);
+        if (l < 1e-6f) l = 1;
+        float ms = (0.5f + smNormal[0] / l * 0.25f) * 63.0f, mt = (0.5f + smNormal[1] / l * 0.5f) * 31.0f;
+        au = (METAL_X0 + 0.5f + ms) / (float)ATLAS_W;
+        av = (band * BAND_H + METAL_Y0 + 0.5f + mt) / (float)ATLAS_H;
+    } else if (u >= 1.0f && v >= 1.0f) {   // untextured triangle: solid patch
         au = (SOLID_X0 + 8) / (float)ATLAS_W;
         av = (band * BAND_H + BAND_H * 0.5f) / (float)ATLAS_H;
     } else {
@@ -1902,6 +1924,7 @@ static void send_frame(Mario *m)
 
     int np = g_ng64PartCount;
     if (np > NG64_MAX_PARTS) np = NG64_MAX_PARTS;
+    int metal = (st->flags & MARIO_METAL_CAP) != 0;
     int ntri = m->geo.numTrianglesUsed;
 
     // geometry per part, deduplicated into unique vertices + corner indices
@@ -1919,7 +1942,7 @@ static void send_frame(Mario *m)
             for (int c = 0; c < 3; c++) {
                 int corner = t * 3 + c;
                 PackedVert pv;
-                pack_vert(&pv, &g_ng64LocalPos[corner * 3], &g_ng64LocalNrm[corner * 3], &m->geo.color[corner * 3], &m->geo.uv[corner * 2]);
+                pack_vert(&pv, &g_ng64LocalPos[corner * 3], &g_ng64LocalNrm[corner * 3], &m->geo.color[corner * 3], &m->geo.uv[corner * 2], metal);
                 const uint8_t *bytes = (const uint8_t *)&pv;
                 uint32_t hsh = 2166136261u;
                 for (size_t k = 0; k < sizeof(PackedVert); k++) hsh = (hsh ^ bytes[k]) * 16777619u;
@@ -2015,7 +2038,7 @@ static void send_obj_piece(int id)
     size_t need = 1 + 2 + 1 + 1 + 2 + 2 + (size_t)nv * sizeof(ObjVert) + (size_t)ni * 2;
     if (need > sizeof(buf)) { logf_("object piece %d too big (%u bytes)", id, (unsigned)need); return; }
     buf[0] = MSG_OBJ_PIECE;
-    memcpy(buf + 1, &pid, 2); buf[3] = (uint8_t)pc->alpha; buf[4] = 0;   // everything is drawn flat: SM64's shading is baked into the atlas
+    memcpy(buf + 1, &pid, 2); buf[3] = (uint8_t)pc->alpha; buf[4] = pc->litTris > pc->unlitTris;   // lit: drawn with Mario's material
     memcpy(buf + 5, &nv, 2); memcpy(buf + 7, &ni, 2);
     memcpy(buf + 9, pc->v, (size_t)nv * sizeof(ObjVert));
     memcpy(buf + 9 + (size_t)nv * sizeof(ObjVert), pc->idx, (size_t)ni * 2);
@@ -2432,6 +2455,7 @@ int main(int argc, char **argv)
     }
     // the pickups' and enemies' models: from the ROM as well (without them the game shows nothing for those)
     s_objOk = objrom_load(rom, romLen, NULL);
+    s_metalOk = s_objOk && objrom_texture_rgba(0x04000090, 0, 2, 64, 32, s_metalTex);   // mario_texture_metal
     if (!s_objOk) logf_("WARNING: could not read the object models from '%s' (%s): pickups and enemies will not be drawn", romPath, objrom_error());
     else logf_("object models read from the ROM: %d pieces", objrom_piece_count());
     snprintf(s_romPathUsed, sizeof(s_romPathUsed), "%s", romPath);

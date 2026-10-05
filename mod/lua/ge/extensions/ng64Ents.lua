@@ -100,10 +100,17 @@ function M.onPiece(data)
     local v = overts[i]
     -- SM64 (x, y up, z) -> BeamNG (x, -z, y), in metres
     verts[i + 1] = { x = v.p[0] * S, y = -v.p[2] * S, z = v.p[1] * S }
-    -- SM64 lights its actors from the camera's side, so whatever the player sees is lit; that shading is baked into the
-    -- atlas. BeamNG's sun would darken whichever side faces away from it (a koopa's shell went black), so every normal
-    -- points at the sky: the whole model takes the light the ground under it does
-    normals[i + 1] = { x = 0, y = 0, z = 1 }
+    -- lit surfaces carry their light's colour in the atlas and are shaded by BeamNG on their normals, exactly as Mario is;
+    -- unlit ones (coins, sprites, vertex-coloured parts) face the sky, taking the light the ground under them does
+    if v.pad ~= 0 then
+      -- a lit vertex: its real normal (SM64 -> BeamNG axes), lit by BeamNG as Mario is
+      local nx, ny, nz = v.n[0] / 127, -v.n[2] / 127, v.n[1] / 127
+      local nl = math.sqrt(nx * nx + ny * ny + nz * nz)
+      if nl < 1e-6 then nl = 1 end
+      normals[i + 1] = { x = nx / nl, y = ny / nl, z = nz / nl }
+    else
+      normals[i + 1] = { x = 0, y = 0, z = 1 }
+    end
     uvs[i + 1] = { u = v.uv[0] / 65535, v = v.uv[1] / 65535 }
   end
   for i = 0, ni - 1 do local k = oidx[i] faces[i + 1] = { v = k, n = k, u = k } end
@@ -375,10 +382,16 @@ function M.update(dt, marioPos)
           if slot then
             local q = p.cq
             if p.flags == 1 and camPos then
-              -- a billboard faces the camera (yaw only)
-              local dx, dy = camPos.x - p.cp[1], camPos.y - p.cp[2]
+              -- a billboard faces the camera, as SM64's mtxf_billboard: turned toward it, and leant back as far as the camera
+              -- is above it (so a sprite seen from above shows its whole face). In BeamNG's conjugate quaternions the turn
+              -- R = Rz(yaw) * Rx(lean) is conj(Rx) * conj(Rz)
+              local dx, dy, dz = camPos.x - p.cp[1], camPos.y - p.cp[2], camPos.z - p.cp[3]
               local th = math.atan2(dx, -dy)
-              q = { 0, 0, -math.sin(th / 2), math.cos(th / 2) }
+              local a = -math.atan2(dz, math.sqrt(dx * dx + dy * dy))
+              local zs, zc = -math.sin(th / 2), math.cos(th / 2)
+              local xs, xc = -math.sin(a / 2), math.cos(a / 2)
+              -- (xs,0,0,xc) * (0,0,zs,zc)
+              q = { xs * zc, -xs * zs, xc * zs, xc * zc }
             end
             slot.obj:setPosRot(p.cp[1], p.cp[2], p.cp[3], q[1], q[2], q[3], q[4])
             if math.abs(p.cs - (slot.scale or 1)) > 1e-4 then
