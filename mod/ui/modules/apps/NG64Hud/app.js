@@ -107,6 +107,12 @@ angular.module("beamng.apps").directive("ng64Hud", [
         // BeamNG's UI unit in pixels. --ui-rem is a calc() expression, so let the browser resolve it on an element
         var remProbe = el("div", "")
         remProbe.style.cssText = "position:absolute;visibility:hidden;width:var(--ui-rem,16px);height:0"
+        // the settings app's HUD scale (1 = BeamNG's own HUD size), kept in this UI's local storage
+        function hudScale() {
+          var v = 1
+          try { v = parseFloat(localStorage.getItem("ng64hud.scale")) || 1 } catch (e) {}
+          return Math.max(0.5, Math.min(3, v))
+        }
         function uiRem() {
           return remProbe.getBoundingClientRect().width || 16
         }
@@ -131,7 +137,7 @@ angular.module("beamng.apps").directive("ng64Hud", [
           // Sized like BeamNG's own HUD: from its UI unit (--ui-rem: 16 px x the UI scale setting), not the window,
           // and each element tucked into its corner / edge of the screen
           var rem = uiRem()
-          var s = rem * UNIT_REM            // SM64 screen units -> pixels
+          var s = rem * UNIT_REM * hudScale()   // SM64 screen units -> pixels (times the settings app's HUD scale)
           var m = MARGIN_REM * rem / s      // margin from the screen edges, in SM64 units
           var cx = w / s / 2                // screen centre, in SM64 units
           var right = w / s, bottom = h / s
@@ -196,6 +202,7 @@ angular.module("beamng.apps").directive("ng64Hud", [
           schedule()
         })
         window.addEventListener("resize", schedule)
+        window.addEventListener("ng64-hud-scale", schedule)
         scope.$on("$destroy", function () {
           window.removeEventListener("resize", schedule)
           if (raf) window.cancelAnimationFrame(raf)

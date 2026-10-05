@@ -13,7 +13,7 @@ angular.module("beamng.apps").directive("ng64Settings", [
           var st = document.createElement("style")
           st.id = "ng64set-style"
           st.textContent =
-            ".ng64set{position:absolute;left:0;top:0;width:230px;box-sizing:border-box;font:13px sans-serif;color:#fff;background:rgba(20,20,28,.82);border-radius:6px;border:1px solid rgba(255,255,255,.2);overflow:hidden;pointer-events:auto;user-select:none;transform-origin:0 0}" +
+            ".ng64set{position:absolute;left:0;top:0;width:230px;box-sizing:border-box;font:13px sans-serif;color:#fff;background:rgba(20,20,28,.82);border-radius:6px;border:1px solid rgba(255,255,255,.2);overflow:hidden;pointer-events:auto;user-select:none}" +
             ".ng64set-head{display:flex;justify-content:space-between;align-items:center;padding:5px 8px;background:rgba(200,40,40,.85);font-weight:bold;cursor:pointer}" +
             ".ng64set-tabs{display:flex;border-bottom:1px solid rgba(255,255,255,.2)}" +
             ".ng64set-tab{flex:1;text-align:center;padding:4px 0;cursor:pointer;opacity:.6}" +
@@ -44,7 +44,6 @@ angular.module("beamng.apps").directive("ng64Settings", [
         function save(k, v) { try { localStorage.setItem("ng64set." + k, String(v)) } catch (e) {} }
         var collapsed = load("collapsed", "0") === "1"
         var tab = load("tab", "settings")
-        var scale = parseFloat(load("scale", "1")) || 1
 
         function mk(tag, cls, parent, html) {
           var e = document.createElement(tag)
@@ -120,15 +119,26 @@ angular.module("beamng.apps").directive("ng64Settings", [
         vol.oninput = function () { volLabel.textContent = "Volume " + vol.value + "%" }
         vol.onchange = function () { lua("setOption('volume', " + vol.value + ")") }
 
-        // the whole panel's size
+        // the SM64 HUD's size (lives, coins, stars, power meter): the HUD app reads it and lays itself out again
         var scaleLabel = mk("div", "", body, "")
         var scl = mk("input", "", body)
-        scl.type = "range"; scl.min = 75; scl.max = 250; scl.step = 5
-        scl.value = Math.round(scale * 100)
-        // the app's own box in the layout is fitted to the panel (at its scale), so nothing is cut off
-        // (the layout sizes a container a few levels up, which clips: every box up to the one the layout sized is fitted)
+        scl.type = "range"; scl.min = 50; scl.max = 300; scl.step = 5
+        var hudScale = 1
+        try { hudScale = parseFloat(localStorage.getItem("ng64hud.scale")) || 1 } catch (e) {}
+        scl.value = Math.round(hudScale * 100)
+        function showScale() { scaleLabel.textContent = "HUD scale " + Math.round(hudScale * 100) + "%" }
+        scl.oninput = function () {
+          hudScale = scl.value / 100
+          showScale()
+          try { localStorage.setItem("ng64hud.scale", String(hudScale)) } catch (e) {}
+          window.dispatchEvent(new Event("ng64-hud-scale"))
+        }
+        showScale()
+
+        // the app's box in the layout is fitted to the panel (a list or the debug tab makes it taller), so nothing is
+        // cut off (the layout sizes a container a few levels up, which clips: every box up to that one is fitted)
         function fitBox() {
-          var w = Math.ceil(230 * scale) + "px", h = Math.ceil(root.offsetHeight * scale) + "px"
+          var w = "230px", h = Math.ceil(root.offsetHeight) + "px"
           for (var el = root.parentElement, k = 0; el && k < 5; el = el.parentElement, k++) {
             el.style.overflow = "visible"
             el.style.minWidth = w
@@ -136,13 +146,6 @@ angular.module("beamng.apps").directive("ng64Settings", [
             if (el.style.width) { el.style.width = w; el.style.height = h; break }
           }
         }
-        function applyScale() {
-          root.style.transform = "scale(" + scale + ")"
-          scaleLabel.textContent = "UI scale " + Math.round(scale * 100) + "%"
-          fitBox()
-        }
-        scl.oninput = function () { scale = scl.value / 100; applyScale() }
-        scl.onchange = function () { save("scale", scale) }
 
         // ---- debug: spawners ---------------------------------------------------------------------------------------
         function spawners(title, list) {
@@ -172,7 +175,7 @@ angular.module("beamng.apps").directive("ng64Settings", [
         tabSet.onclick = function () { tab = "settings"; save("tab", tab); apply() }
         tabDbg.onclick = function () { tab = "debug"; save("tab", tab); apply() }
         apply()
-        applyScale()
+        fitBox()
 
         function show(o) {
           pick.checked = !!o.pickups
