@@ -371,7 +371,7 @@ static void emit_tri(GfxState *g, int a, int b, int c)
 #ifdef OBJROM_TEST
                 if (s_oorTris < 40) printf("oor: dl %08X scale %X/%X raw %d,%d tex %08X %dx%d fmt%d/%d cms%d cmt%d s=%.1f t=%.1f\n", g->root, g->scaleS, g->scaleT, vs[i]->s, vs[i]->t, g->loaded, w, h, g->tile[0].fmt, g->tile[0].siz, g->tile[0].cms, g->tile[0].cmt, st[i][0], st[i][1]);
 #endif
-                break; }
+            }
         }
     } else {
         // untextured: the combiner with no texel (G_CC_SHADE, or a fade's shade plus the environment alpha)
@@ -394,6 +394,9 @@ static void emit_tri(GfxState *g, int a, int b, int c)
         clampS = (g->tile[t].cms & 2) != 0; clampT = (g->tile[t].cmt & 2) != 0;
     }
     int outside = 0;
+#ifdef OBJROM_TEST
+    if (getenv("TEXDBG") && g->loaded == (uint32_t)strtoul(getenv("TEXDBG"), 0, 16)) printf("tri st (%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f) clamp %d%d size %dx%d\n", st[0][0], st[0][1], st[1][0], st[1][1], st[2][0], st[2][1], clampS, clampT, cw, ch);
+#endif
     for (int i = 0; i < 3; i++)
         if ((clampS && (st[i][0] < -0.01f || st[i][0] > cw + 0.01f)) || (clampT && (st[i][1] < -0.01f || st[i][1] > ch + 0.01f))) outside = 1;
     if (!outside) {
@@ -986,6 +989,44 @@ int main(int argc, char **argv)
     if (!objrom_load(rom, n, NULL) || !objrom_write_atlas(argv[2])) { printf("FAILED: %s\n", objrom_error()); return 1; }
     if (argc > 3) { int id = atoi(argv[3]); for (int k = 0; k < s_pieces[id].nv; k++) printf("v%d p(%d,%d,%d) uv(%.1f,%.1f)\n", k, s_pieces[id].v[k].p[0], s_pieces[id].v[k].p[1], s_pieces[id].v[k].p[2], s_pieces[id].v[k].uv[0] / 65535.0 * ATLAS_W, s_pieces[id].v[k].uv[1] / 65535.0 * s_atlasH); }
     printf("pieces %d, atlas rects %d, out-of-range-uv triangles %d\n", s_nPieces, s_nRects, s_oorTris);
+    if (argc > 6) {   // render piece argv[4] seen from axis argv[5] (x, -x, z, -z, y) into argv[6]
+        int id = atoi(argv[4]); const char *ax = argv[5];
+        ObjPiece *pc = &s_pieces[id];
+        int W = 512; uint8_t *img = calloc((size_t)W * W, 4); float *zb = malloc((size_t)W * W * 4);
+        for (int i = 0; i < W * W; i++) { zb[i] = -1e9f; img[i*4] = 60; img[i*4+1] = 60; img[i*4+2] = 60; img[i*4+3] = 255; }
+        float mn = 1e9f, mx = -1e9f;
+        for (int k = 0; k < pc->nv; k++) for (int a2 = 0; a2 < 3; a2++) { if (pc->v[k].p[a2] < mn) mn = pc->v[k].p[a2]; if (pc->v[k].p[a2] > mx) mx = pc->v[k].p[a2]; }
+        float sc = (W - 20) / (mx - mn);
+        for (int t = 0; t + 2 < pc->ni; t += 3) {
+            float P[3][3], U[3][2];
+            for (int c = 0; c < 3; c++) {
+                ObjVert *v = &pc->v[pc->idx[t + c]];
+                float x = v->p[0], y = v->p[1], z = v->p[2], u, w, d;
+                if (!strcmp(ax, "x")) { u = -z; w = y; d = x; } else if (!strcmp(ax, "-x")) { u = z; w = y; d = -x; }
+                else if (!strcmp(ax, "z")) { u = x; w = y; d = z; } else if (!strcmp(ax, "-z")) { u = -x; w = y; d = -z; } else { u = x; w = -z; d = y; }
+                P[c][0] = (u - mn) * sc + 10; P[c][1] = W - ((w - mn) * sc + 10); P[c][2] = d;
+                U[c][0] = v->uv[0] / 65535.0f * ATLAS_W; U[c][1] = v->uv[1] / 65535.0f * s_atlasH;
+            }
+            float area = (P[1][0]-P[0][0])*(P[2][1]-P[0][1]) - (P[2][0]-P[0][0])*(P[1][1]-P[0][1]);
+            if (fabsf(area) < 1e-6f) continue;
+            for (int py = 0; py < W; py++) for (int px = 0; px < W; px++) {
+                float b1 = ((px-P[0][0])*(P[2][1]-P[0][1]) - (P[2][0]-P[0][0])*(py-P[0][1])) / area;
+                float b2 = ((P[1][0]-P[0][0])*(py-P[0][1]) - (px-P[0][0])*(P[1][1]-P[0][1])) / area;
+                float b0 = 1 - b1 - b2;
+                if (b0 < 0 || b1 < 0 || b2 < 0) continue;
+                float d = b0*P[0][2] + b1*P[1][2] + b2*P[2][2];
+                if (d < zb[py*W+px]) continue;
+                zb[py*W+px] = d;
+                int tu = (int)(b0*U[0][0] + b1*U[1][0] + b2*U[2][0]), tv = (int)(b0*U[0][1] + b1*U[1][1] + b2*U[2][1]);
+                if (tu < 0) tu = 0;
+                if (tu >= ATLAS_W) tu = ATLAS_W - 1;
+                if (tv < 0) tv = 0;
+                if (tv >= s_atlasH) tv = s_atlasH - 1;
+                memcpy(img + ((size_t)py*W+px)*4, s_atlas + ((size_t)tv*ATLAS_W+tu)*4, 3);
+            }
+        }
+        png_write_rgba(argv[6], img, W, W);
+    }
     for (int i = 0; i < s_nPieces; i++) printf("piece %2d: %3d verts %3d idx lit %d unlit %d%s\n", i, s_pieces[i].nv, s_pieces[i].ni, s_pieces[i].litTris, s_pieces[i].unlitTris, s_pieces[i].alpha ? " (alpha)" : "");
     for (int m = 0; m < OM_COUNT; m++) {
         ObjPose pose; memset(&pose, 0, sizeof(pose)); pose.scale[0] = pose.scale[1] = pose.scale[2] = 1;
