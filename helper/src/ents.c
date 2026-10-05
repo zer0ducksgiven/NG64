@@ -2428,9 +2428,14 @@ void ents_car_hit(int id, int kind, int haveDir, float dirX, float dirZ)
         if (!o->used || o->id != id || !is_enemy(o->ent) || o->bhv == B_SHELL) continue;
         if (o->action >= 100 || (o->interactStatus & INT_STATUS_INTERACTED)) return;
         // a car at speed is a "fast attack": the same status Mario's slide kick or a dive gives; the knock-back goes the way the car went
+        if (o->bhv == B_BOBOMB) {
+            // a bob-omb goes off when anything but Mario touches it (obj_attack_collided_from_other_object): a car too
+            if (o->heldState != HELD_FREE) return;
+            o->interactStatus |= INT_STATUS_INTERACTED | INT_STATUS_TOUCHED_BOB_OMB;
+            return;
+        }
         if (haveDir) { o->carHit = 1; o->carYaw = atan2s(dirZ, dirX); }
         o->interactStatus = ATTACK_FAST_ATTACK + (INT_STATUS_INTERACTED | INT_STATUS_WAS_ATTACKED);
-        if (o->bhv == B_BOBOMB) o->interactStatus |= INT_STATUS_MARIO_KNOCKBACK_DMG;   // it is launched like a kicked bob-omb
         return;
     }
 }

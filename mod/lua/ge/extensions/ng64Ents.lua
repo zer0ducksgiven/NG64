@@ -281,6 +281,7 @@ function M.setOption(key, value)
   elseif key == "enemies" then opts.enemies = value and true or false sendOptions()
   elseif key == "song" then
     local idx = tonumber(value) or -1
+    opts.song = idx < 0 and -1 or idx
     sendOptions(idx < 0 and 254 or math.min(253, idx), nil)
   elseif key == "volume" then
     opts.volume = math.max(0, math.min(100, math.floor((tonumber(value) or 100) + 0.5)))
@@ -320,7 +321,8 @@ local function checkCars(marioPos)
               local len = ax[k]:length()
               if len > 1e-3 and math.abs(p:dot(ax[k]) / len) > len + 0.35 then inside = false break end
             end
-            if inside and speed > 2.5 and simTime - (carHit[eid .. ":" .. id] or -9) > 1.0 then
+            -- a bob-omb goes off at any touch; the others need the car to be moving to be knocked out
+            if inside and (speed > 2.5 or e.type == BOBOMB) and simTime - (carHit[eid .. ":" .. id] or -9) > 1.0 then
               carHit[eid .. ":" .. id] = simTime
               -- the helper treats it as a fast attack, knocked the way the car was going
               api.sendRaw("c" .. string.char(eid % 256, math.floor(eid / 256), 0) .. ffi.string(ffi.new("float[2]", vel.x, vel.y), 8))

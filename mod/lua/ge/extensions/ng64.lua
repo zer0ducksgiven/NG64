@@ -113,6 +113,9 @@ local function ensureMaterial(path)
   mat:setField("mapTo", 0, name)
   mat:setField("colorMap", 0, path)
   mat:setField("diffuseColor", 0, "1 1 1 1")
+  -- the wing cap's feathers are cut out by the texture's alpha (everything else in the atlas is opaque)
+  mat:setField("alphaTest", 0, "1")
+  mat:setField("alphaRef", 0, "127")
   mat.canSave = false
   mat:registerObject(name)
   -- sm64's winding is back-facing for BeamNG; doubleSided only takes effect after a flush/reload
@@ -1431,6 +1434,14 @@ M.ents = fixes.ents
 M.holdCamera = function(on) fixes.holdCamera = on end
 M.showModel = function(model, x, y, z, yawDeg, animState, animIdx, frame)
   sendRaw("u" .. string.char(model) .. packF(x, y, z) .. packI16(math.floor((yawDeg or 0) * 65536 / 360) % 65536 - (((yawDeg or 0) * 65536 / 360) % 65536 >= 32768 and 65536 or 0)) .. string.char(animState or 0, animIdx or 255) .. packI16(frame or 0))
+end
+-- the settings app's debug tab: a real pickup or enemy (its entity type; 199 = a red coin course) 2 m in front of Mario
+M.debugSpawn = function(entType)
+  local f = lastLocalFrame
+  if not f then return end
+  local a = f.faceAngle or 0
+  local d = entType == 199 and 0 or 2
+  M.showModel(entType == 199 and 199 or 200 + entType, f.pos.x + math.sin(a) * d, f.pos.y - math.cos(a) * d, f.pos.z + 0.05)
 end
 M.setOption = fixes.ents.setOption
 M.resendSettings = fixes.ents.resendSettings

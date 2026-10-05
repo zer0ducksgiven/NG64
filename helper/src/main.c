@@ -169,6 +169,8 @@ static void write_atlas(void)
                     o[0] = (uint8_t)(cr + (t[0] - cr) * a);
                     o[1] = (uint8_t)(cg + (t[1] - cg) * a);
                     o[2] = (uint8_t)(cb + (t[2] - cb) * a);
+                    // the wing cap's wings (textures 9 and 10) are cut out by their alpha, not laid over the colour
+                    if (x >= 9 * 64) { o[0] = (uint8_t)(t[0] * cr / 255); o[1] = (uint8_t)(t[1] * cg / 255); o[2] = (uint8_t)(t[2] * cb / 255); o[3] = t[3]; continue; }
                 } else if (s_metalOk && x >= METAL_X0 - 4 && x < METAL_X0 + 68 && y >= METAL_Y0 - 4 && y < METAL_Y0 + 36) {
                     int mx = x - METAL_X0, my = y - METAL_Y0;   // edges replicated a few texels out
                     mx = mx < 0 ? 0 : mx > 63 ? 63 : mx; my = my < 0 ? 0 : my > 31 ? 31 : my;
@@ -1354,12 +1356,14 @@ static void music_update(Pad *pad)
         snprintf(msg, sizeof(msg), "Music %d/%d: %s", s_song + 1, NUM_SONGS, s_songs[s_song].name);
         send_toast(msg);
         logf_("song %d: %s", s_song + 1, s_songs[s_song].name);
+        save_settings(); send_options_state();   // the settings app shows it
     }
     int released = !held && s_prevMusic;
     if (released && !s_musicCombo && s_inputEnabled) {
         s_musicOn = !s_musicOn;
         send_toast(s_musicOn ? "Music on" : "Music off");
         logf_("music %s", s_musicOn ? "on" : "off");
+        save_settings(); send_options_state();
     }
     if (!held) s_musicCombo = 0;
     s_prevMusic = held;
