@@ -232,13 +232,13 @@ local function blastCars(x, y, z, radius)
         if dist < radius then
           local f = 1 - dist / radius
           local hitPoint = ctr - dir * extent
-          local dent = 0.25 + 0.35 * f
+          local dent = 0.6 + 0.9 * f
           M.hitLog[#M.hitLog + 1] = string.format('%.2f blast f=%.2f dist=%.2f', simTime, f, dist)
           veh:queueLuaCommand(string.format(
             "if not ng64Hit then extensions.load('ng64Hit') end ng64Hit.hit(%f,%f,%f,%f,%f,%f,%f,%f)",
-            -- strong, not wrecking: a dent of up to about half a punch (a hit low on a wheel or axle broke them and rolled
-            -- the car), and the whole car shoved 0.6..1.6 m/s by how close it was (8th argument scales the shove alone)
-            hitPoint.x, hitPoint.y, hitPoint.z, dir.x, dir.y, math.max(dir.z, 0.1), dent, (0.6 + 1.0 * f) / (1.1 * dent)))
+            -- a real blast, short of the wrecking it was: up close a dent of about a punch and a half and the whole car
+            -- thrown 1.5..5 m/s (up and away) by how close it was (the 8th argument scales the shove alone)
+            hitPoint.x, hitPoint.y, hitPoint.z, dir.x, dir.y, math.max(dir.z, 0.35), dent, (1.5 + 3.5 * f) / (1.1 * dent)))
         end
       end
     end
