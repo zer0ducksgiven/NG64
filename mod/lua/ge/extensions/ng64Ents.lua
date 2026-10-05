@@ -210,6 +210,7 @@ function M.onEntities(data)
 end
 
 -- cars within the blast are dented and shoved away from it
+M.hitLog = {}   -- tests: the hits sent to cars
 local function blastCars(x, y, z, radius)
   local c = vec3(x, y, z)
   for i = 0, be:getObjectCount() - 1 do
@@ -231,9 +232,13 @@ local function blastCars(x, y, z, radius)
         if dist < radius then
           local f = 1 - dist / radius
           local hitPoint = ctr - dir * extent
+          local dent = 0.25 + 0.35 * f
+          M.hitLog[#M.hitLog + 1] = string.format('%.2f blast f=%.2f dist=%.2f', simTime, f, dist)
           veh:queueLuaCommand(string.format(
-            "if not ng64Hit then extensions.load('ng64Hit') end ng64Hit.hit(%f,%f,%f,%f,%f,%f,%f)",
-            hitPoint.x, hitPoint.y, hitPoint.z, dir.x, dir.y, math.max(dir.z, 0.15), 2 + 9 * f))
+            "if not ng64Hit then extensions.load('ng64Hit') end ng64Hit.hit(%f,%f,%f,%f,%f,%f,%f,%f)",
+            -- strong, not wrecking: a dent of up to about half a punch (a hit low on a wheel or axle broke them and rolled
+            -- the car), and the whole car shoved 0.6..1.6 m/s by how close it was (8th argument scales the shove alone)
+            hitPoint.x, hitPoint.y, hitPoint.z, dir.x, dir.y, math.max(dir.z, 0.1), dent, (0.6 + 1.0 * f) / (1.1 * dent)))
         end
       end
     end
@@ -330,6 +335,7 @@ local function checkCars(marioPos)
               local strength = e.type == GOOMBA and 0.7 or e.type == KOOPA and 0.9 or e.type == SHELL and 1.4 or 0.4
               local dir = speed > 0.5 and (-vel / speed) or vec3(0, 0, 1)
               local at = vec3(e.tx, e.ty, e.tz + 0.3)
+              M.hitLog[#M.hitLog + 1] = string.format('%.2f touch type=%d speed=%.1f', simTime, e.type, speed)
               veh:queueLuaCommand(string.format(
                 "if not ng64Hit then extensions.load('ng64Hit') end ng64Hit.hit(%f,%f,%f,%f,%f,%f,%f,0)",
                 at.x, at.y, at.z, dir.x, dir.y, dir.z, strength))
