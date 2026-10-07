@@ -12,11 +12,22 @@
 - Goombas, bob-ombs and koopas spawn around Mario in roughly SM64's proportions, capped to a reasonable number, as the
   ROM's own models with their animations, running the game's own behaviour code (ported from the decompilation: walking,
   chasing, jumping, fuses, explosions, koopas losing and chasing their shells, the attack and knock-back rules, Mario's
-  hit boxes). Cars hit them like a slide kick (the car takes a small dent), and a bob-omb's blast dents and shoves cars.
+  hit boxes). Cars hit them like a slide kick (the car takes a small dent), and a bob-omb goes off at a car's touch: its
+  blast dents the car and throws it up and away.
+- Bob-ombs can be picked up, carried and thrown, as in SM64.
+- When the player drives off in a car and leaves Mario behind, pickups and enemies spawn and stay active around that car
+  too, with the ground streamed in under them.
+
+**Stars and red coins**
+- Collecting a Power Star plays SM64's star dance and jingle, with the sparkles and the celebration star.
+- Red coin courses as in SM64: eight red coins with their orange counters and rising sounds; the eighth makes a star
+  appear from its marker with the star-spawn jingle.
+- Metal Mario uses the ROM's metal texture; the Wing Cap's wings have their proper cut-out feathers.
 
 **Settings app**
 - A small collapsible "NG64 Settings" panel appears with the HUD: pickups and enemies switches, a music picker and a volume
   slider. Settings are saved in `ng64settings.txt` next to the helper.
+- The music list has previous/next buttons and follows the song keys; a scale slider sizes the SM64 HUD.
 
 ## 0.1.4
 
