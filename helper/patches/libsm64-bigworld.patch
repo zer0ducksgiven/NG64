@@ -1,0 +1,24 @@
+--- a/src/decomp/engine/surface_collision.c	2026-10-07 21:38:26.882441100 +0100
++++ b/src/decomp/engine/surface_collision.c	2026-10-07 21:38:26.922211300 +0100
+@@ -10,7 +10,9 @@
+  */
+ static struct SM64SurfaceCollisionData *find_ceil_from_list( s32 x, s32 y, s32 z, f32 *pheight) {
+     register struct SM64SurfaceCollisionData *surf;
+-    register s32 x1, z1, x2, z2, x3, z3;
++    // NG64: 64 bit, so the edge tests don't overflow in maps far bigger than SM64's (an SM64 port's courses lie
++    // hundreds of thousands of units out: a distant triangle's products wrapped and it passed for a floor overhead)
++    register s64 x1, z1, x2, z2, x3, z3;
+     struct SM64SurfaceCollisionData *ceil = NULL;
+ 
+     ceil = NULL;
+@@ -85,7 +87,9 @@
+  */
+ static struct SM64SurfaceCollisionData *find_floor_from_list( s32 x, s32 y, s32 z, f32 *pheight) {
+     register struct SM64SurfaceCollisionData *surf;
+-    register s32 x1, z1, x2, z2, x3, z3;
++    // NG64: 64 bit, so the edge tests don't overflow in maps far bigger than SM64's (an SM64 port's courses lie
++    // hundreds of thousands of units out: a distant triangle's products wrapped and it passed for a floor overhead)
++    register s64 x1, z1, x2, z2, x3, z3;
+     f32 nx, ny, nz;
+     f32 oo;
+     f32 height;
